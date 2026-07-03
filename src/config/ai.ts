@@ -1,18 +1,17 @@
 import { ChatOpenAI } from "@langchain/openai";
 import { env } from "./env.js";
 
-// LangChain OpenRouter Configuration
 export const chatModel = new ChatOpenAI({
   modelName: env.AI_MODEL_DEFAULT,
-  openAIApiKey: env.OPENROUTER_API_KEY || "dummy", // Fallback to avoid crash if env missing during build
+  apiKey: env.AI_GATEWAY_API_KEY || env.OPENROUTER_API_KEY || "dummy",
   configuration: {
-    baseURL: "https://openrouter.ai/api/v1",
+    baseURL: env.AI_GATEWAY_URL,
     defaultHeaders: {
-      "HTTP-Referer": env.APP_URL, // OpenRouter requires Referer
-      "X-Title": "DevReview AI", // OpenRouter requires Title
+      "HTTP-Referer": env.APP_URL,
+      "X-Title": "DevReview AI",
     },
   },
-  temperature: 0, // Deterministic for code reviews
+  temperature: 0,
 });
 
 export const models = {
