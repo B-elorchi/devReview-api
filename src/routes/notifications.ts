@@ -6,6 +6,21 @@ import { supabaseAdmin } from "../config/supabase.js";
 const r = Router();
 r.use(requireAuth);
 
+const defaultPreferences = {
+  email_review_complete: true,
+  email_pr_opened: true,
+  email_deploy_failed: true,
+  email_weekly_report: false,
+  push_review_complete: true,
+  push_pr_opened: false,
+  push_deploy_failed: true,
+  push_weekly_report: false,
+};
+
+function isMissingTableError(error: unknown) {
+  return typeof error === "object" && error !== null && "code" in error && (error as { code?: string }).code === "PGRST205";
+}
+
 r.get("/", async (req, res) => {
   const { data, error } = await supabaseAdmin.from("notifications")
     .select("*").eq("user_id", req.user!.id)
@@ -34,20 +49,15 @@ r.get("/preferences", async (req, res) => {
     .select("*")
     .eq("user_id", req.user!.id)
     .maybeSingle();
-  if (error) throw error;
-  // Return defaults if no row yet
-  res.json({
-    preferences: data ?? {
-      email_review_complete: true,
-      email_pr_opened: true,
-      email_deploy_failed: true,
-      email_weekly_report: false,
-      push_review_complete: true,
-      push_pr_opened: false,
-      push_deploy_failed: true,
-      push_weekly_report: false,
-    },
-  });
+
+  if (error) {
+    if (isMissingTableError(error)) {
+      return res.json({ preferences: defaultPreferences, persisted: false });
+    }
+    throw error;
+  }
+
+  res.json({ preferences: data ?? defaultPreferences, persisted: !!data });
 });
 
 r.patch("/preferences", async (req, res) => {
@@ -67,8 +77,15 @@ r.patch("/preferences", async (req, res) => {
     .upsert({ user_id: req.user!.id, ...body }, { onConflict: "user_id" })
     .select()
     .single();
-  if (error) throw error;
-  res.json({ preferences: data });
+
+  if (error) {
+    if (isMissingTableError(error)) {
+      return res.json({ preferences: { ...defaultPreferences, ...body }, persisted: false });
+    }
+    throw error;
+  }
+
+  res.json({ preferences: data, persisted: true });
 });
 
 export default r;

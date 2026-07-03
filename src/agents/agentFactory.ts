@@ -121,12 +121,11 @@ export async function runAgent({
 
   let full = "";
 
-  // streamMode "messages" emits 3-element tuples: [nodeId, "messages", [BaseMessage, metadata]]
+  // streamMode "messages" emits [message, metadata] tuples.
   const stream = await agent.stream({ messages }, { streamMode: "messages" });
 
   for await (const item of stream) {
-    // item = [nodeId, "messages", [message, meta]]
-    const chunk = Array.isArray(item) && Array.isArray(item[2]) ? item[2][0] : item;
+    const chunk = Array.isArray(item) ? item[0] : item;
 
     // Only forward AIMessage chunks that carry plain text (skip ToolMessage and tool_call chunks)
     if (!(chunk instanceof AIMessage)) continue;
