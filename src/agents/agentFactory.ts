@@ -1,5 +1,5 @@
 import { createReactAgent } from "@langchain/langgraph/prebuilt";
-import { AIMessage, HumanMessage, SystemMessage } from "@langchain/core/messages";
+import { AIMessage, AIMessageChunk, BaseMessage, HumanMessage, SystemMessage } from "@langchain/core/messages";
 import { chatModel } from "../config/ai.js";
 import {
   analyzeCodeStructureTool,
@@ -29,6 +29,7 @@ Behaviour:
     3. extract_functions → examine individual functions
     4. search_patterns → dig deeper if needed
   Then reply with a numbered list of findings (line ref, severity 🔴🟠🟡🟢, issue, fix) and an overall score /100.
+- When the user asks to ADD, UPDATE, EDIT, FIX, or MODIFY the file (e.g. "add a comment", "fix the bug", "refactor this") — return the COMPLETE updated file inside a SINGLE fenced code block with the correct language tag. Include EVERY line of the file, not just the changed part. Never return only a snippet.
 - For targeted questions ("is there a bug on line 12?") — answer directly, only calling tools if needed.
 - Keep responses clear and actionable. Use markdown formatting.`,
 
@@ -36,6 +37,7 @@ Behaviour:
 
 Behaviour:
 - For casual messages — respond conversationally without calling tools.
+- When the user asks to ADD, UPDATE, EDIT, FIX, or MODIFY the file — return the COMPLETE updated file inside a SINGLE fenced code block with the correct language tag. Include EVERY line, never just a snippet.
 - When asked to analyse quality, measure complexity, or review architecture — use your tools:
     1. analyze_code_structure → baseline metrics
     2. measure_complexity → identify hotspots
@@ -49,6 +51,7 @@ Behaviour:
 
 Behaviour:
 - For casual messages — respond conversationally without calling tools.
+- When the user asks to ADD, UPDATE, EDIT, FIX, or MODIFY the file — return the COMPLETE updated file inside a SINGLE fenced code block with the correct language tag. Include EVERY line, never just a snippet.
 - When asked to scan, audit, check security, or find vulnerabilities — use your tools:
     1. scan_vulnerabilities → check for OWASP Top 10 issues (always run this first for security requests)
     2. check_dependency_risks → risky imports
@@ -61,6 +64,7 @@ Behaviour:
 
 Behaviour:
 - For casual messages — respond conversationally without calling tools.
+- When the user asks to ADD, UPDATE, EDIT, FIX, or MODIFY the file — return the COMPLETE updated file inside a SINGLE fenced code block with the correct language tag. Include EVERY line, never just a snippet.
 - When asked to analyse a file, check a Dockerfile, review CI/CD config, or audit IaC — use your tools:
     1. detect_cicd_patterns → understand the file's purpose
     2. analyze_dockerfile → if it looks like a Dockerfile
@@ -99,17 +103,16 @@ export async function runAgent({
   const tools = AGENT_TOOLS[agentType];
   const systemPrompt = SYSTEM_PROMPTS[agentType];
 
-  const agent = createReactAgent({ llm: chatModel, tools });
-
-  // Build messages
-  const messages: (HumanMessage | SystemMessage)[] = [];
-
-  // System context
+  // Build system prompt
   let systemContent = systemPrompt;
   if (fileContent && fileName) {
     systemContent += `\n\nCurrent file: **${fileName}**\n\`\`\`\n${fileContent.slice(0, 80_000)}\n\`\`\``;
   }
-  messages.push(new SystemMessage(systemContent));
+
+  const agent = createReactAgent({ llm: chatModel, tools, stateModifier: systemContent });
+
+  // Build conversation messages (no SystemMessage — passed via stateModifier above)
+  const messages: (HumanMessage)[] = [];
 
   // Conversation history
   for (const h of history) {
@@ -119,21 +122,18 @@ export async function runAgent({
   // Current user message
   messages.push(new HumanMessage(message));
 
-  let full = "";
-
-  // streamMode "messages" emits 3-element tuples: [nodeId, "messages", [BaseMessage, metadata]]
+  // streamMode:"messages" emits 2-tuples: [BaseMessage|AIMessageChunk, metadata]
   const stream = await agent.stream({ messages }, { streamMode: "messages" });
 
-  for await (const item of stream) {
-    // item = [nodeId, "messages", [message, meta]]
-    const chunk = Array.isArray(item) && Array.isArray(item[2]) ? item[2][0] : item;
+  let full = "";
 
-    // Only forward AIMessage chunks that carry plain text (skip ToolMessage and tool_call chunks)
-    if (!(chunk instanceof AIMessage)) continue;
+  for await (const [chunk, _meta] of stream) {
+    // Accept AIMessageChunk (streaming tokens) and AIMessage (final node output)
+    const isAI = chunk instanceof AIMessage || chunk instanceof AIMessageChunk;
+    if (!isAI) continue;
 
-    const hasToolCalls =
-      Array.isArray((chunk as any).tool_calls) && (chunk as any).tool_calls.length > 0;
-    if (hasToolCalls) continue;
+    // Skip tool-call invocation chunks (contain function args, no text yet)
+    if (Array.isArray((chunk as any).tool_calls) && (chunk as any).tool_calls.length > 0) continue;
 
     const text = typeof chunk.content === "string" ? chunk.content : "";
     if (text) {

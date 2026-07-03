@@ -78,6 +78,13 @@ ALTER TABLE public.notification_preferences ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.telegram_messages ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.devops_generations ENABLE ROW LEVEL SECURITY;
 
+DO $$ BEGIN
+  DROP POLICY IF EXISTS "invites scoped" ON public.workspace_invites;
+  DROP POLICY IF EXISTS "own preferences" ON public.notification_preferences;
+  DROP POLICY IF EXISTS "own tg messages" ON public.telegram_messages;
+  DROP POLICY IF EXISTS "devops scoped" ON public.devops_generations;
+END $$;
+
 CREATE POLICY "invites scoped" ON public.workspace_invites FOR ALL TO authenticated
   USING (public.is_workspace_member(workspace_id, auth.uid()));
 

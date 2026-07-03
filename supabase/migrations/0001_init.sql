@@ -1,11 +1,9 @@
--- DevReview AI — Initial schema
--- Run with: supabase db push
+-- DevReview AI — Initial schema (idempotent)
 
 CREATE EXTENSION IF NOT EXISTS "pgcrypto";
 
-
 -- PROFILES
-CREATE TABLE public.profiles (
+CREATE TABLE IF NOT EXISTS public.profiles (
   id UUID PRIMARY KEY REFERENCES auth.users(id) ON DELETE CASCADE,
   email text,
   full_name text,
@@ -17,7 +15,7 @@ CREATE TABLE public.profiles (
 );
 
 -- WORKSPACES
-CREATE TABLE public.workspaces (
+CREATE TABLE IF NOT EXISTS public.workspaces (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   name text NOT NULL,
   slug text NOT NULL UNIQUE,
@@ -28,8 +26,11 @@ CREATE TABLE public.workspaces (
 );
 
 -- WORKSPACE MEMBERS
-CREATE TYPE public.workspace_role AS ENUM ('owner','admin','member','viewer');
-CREATE TABLE public.workspace_members (
+DO $$ BEGIN
+  CREATE TYPE public.workspace_role AS ENUM ('owner','admin','member','viewer');
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+CREATE TABLE IF NOT EXISTS public.workspace_members (
   workspace_id UUID NOT NULL REFERENCES public.workspaces(id) ON DELETE CASCADE,
   user_id UUID NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
   role public.workspace_role NOT NULL DEFAULT 'member',
@@ -37,27 +38,23 @@ CREATE TABLE public.workspace_members (
   PRIMARY KEY (workspace_id, user_id)
 );
 
--- Function to check workspace roles
 CREATE OR REPLACE FUNCTION public.has_workspace_role(check_workspace_id UUID, required_roles text[])
-RETURNS boolean
-LANGUAGE sql STABLE SECURITY DEFINER
-AS $$
+RETURNS boolean LANGUAGE sql STABLE SECURITY DEFINER AS $$
   SELECT EXISTS(
-    SELECT 1 FROM public.workspace_members 
-    WHERE workspace_id = check_workspace_id 
-    AND user_id = auth.uid() 
+    SELECT 1 FROM public.workspace_members
+    WHERE workspace_id = check_workspace_id
+    AND user_id = auth.uid()
     AND role = ANY(required_roles::public.workspace_role[])
   );
 $$;
 
--- Helper: is user member of workspace
 CREATE OR REPLACE FUNCTION public.is_workspace_member(_ws uuid, _uid uuid)
 RETURNS boolean LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public AS $$
   SELECT EXISTS(SELECT 1 FROM public.workspace_members WHERE workspace_id = _ws AND user_id = _uid)
 $$;
 
 -- PROJECTS
-CREATE TABLE public.projects (
+CREATE TABLE IF NOT EXISTS public.projects (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   workspace_id UUID NOT NULL REFERENCES public.workspaces(id) ON DELETE CASCADE,
   name text NOT NULL,
@@ -72,7 +69,7 @@ CREATE TABLE public.projects (
 );
 
 -- PULL REQUESTS
-CREATE TABLE public.pull_requests (
+CREATE TABLE IF NOT EXISTS public.pull_requests (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   project_id UUID NOT NULL REFERENCES public.projects(id) ON DELETE CASCADE,
   number integer NOT NULL,
@@ -86,7 +83,7 @@ CREATE TABLE public.pull_requests (
 );
 
 -- REVIEWS
-CREATE TABLE public.reviews (
+CREATE TABLE IF NOT EXISTS public.reviews (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   project_id UUID NOT NULL REFERENCES public.projects(id) ON DELETE CASCADE,
   pr_id UUID REFERENCES public.pull_requests(id) ON DELETE SET NULL,
@@ -104,7 +101,7 @@ CREATE TABLE public.reviews (
 );
 
 -- REVIEW FINDINGS
-CREATE TABLE public.review_findings (
+CREATE TABLE IF NOT EXISTS public.review_findings (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   review_id UUID NOT NULL REFERENCES public.reviews(id) ON DELETE CASCADE,
   file_path text, line int,
@@ -117,19 +114,23 @@ CREATE TABLE public.review_findings (
 );
 
 -- AGENTS
-CREATE TABLE public.agents (
+CREATE TABLE IF NOT EXISTS public.agents (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   workspace_id UUID REFERENCES public.workspaces(id) ON DELETE CASCADE,
-  slug text NOT NULL,
+  slug text,
   name text NOT NULL,
+  description text NOT NULL DEFAULT '',
   system_prompt text NOT NULL,
-  model text NOT NULL,
+  model text NOT NULL DEFAULT 'gpt-4.1-mini',
   tools jsonb DEFAULT '[]'::jsonb,
+  icon_key varchar(40) NOT NULL DEFAULT 'bot',
+  color varchar(100) NOT NULL DEFAULT 'from-primary to-accent',
   created_by UUID REFERENCES auth.users(id),
-  created_at timestamptz DEFAULT now()
+  created_at timestamptz DEFAULT now(),
+  updated_at timestamptz
 );
 
-CREATE TABLE public.agent_sessions (
+CREATE TABLE IF NOT EXISTS public.agent_sessions (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   agent_id UUID NOT NULL REFERENCES public.agents(id) ON DELETE CASCADE,
   started_by UUID REFERENCES auth.users(id),
@@ -140,7 +141,7 @@ CREATE TABLE public.agent_sessions (
 );
 
 -- ONLINE IDE
-CREATE TABLE public.editor_sandboxes (
+CREATE TABLE IF NOT EXISTS public.editor_sandboxes (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   owner_id UUID NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
   project_id UUID REFERENCES public.projects(id) ON DELETE SET NULL,
@@ -151,7 +152,7 @@ CREATE TABLE public.editor_sandboxes (
   last_active_at timestamptz DEFAULT now()
 );
 
-CREATE TABLE public.editor_files (
+CREATE TABLE IF NOT EXISTS public.editor_files (
   sandbox_id UUID NOT NULL REFERENCES public.editor_sandboxes(id) ON DELETE CASCADE,
   path text NOT NULL,
   type text NOT NULL DEFAULT 'file',
@@ -162,7 +163,7 @@ CREATE TABLE public.editor_files (
 );
 
 -- INTEGRATIONS
-CREATE TABLE public.github_installations (
+CREATE TABLE IF NOT EXISTS public.github_installations (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   workspace_id UUID REFERENCES public.workspaces(id) ON DELETE CASCADE,
   installation_id bigint NOT NULL UNIQUE,
@@ -170,14 +171,14 @@ CREATE TABLE public.github_installations (
   created_at timestamptz DEFAULT now()
 );
 
-CREATE TABLE public.telegram_links (
+CREATE TABLE IF NOT EXISTS public.telegram_links (
   user_id UUID PRIMARY KEY REFERENCES auth.users(id) ON DELETE CASCADE,
   chat_id text NOT NULL,
   linked_at timestamptz DEFAULT now()
 );
 
 -- API KEYS
-CREATE TABLE public.api_keys (
+CREATE TABLE IF NOT EXISTS public.api_keys (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   user_id UUID NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
   name text NOT NULL,
@@ -188,7 +189,7 @@ CREATE TABLE public.api_keys (
 );
 
 -- SECRETS VAULT
-CREATE TABLE public.secrets_vault (
+CREATE TABLE IF NOT EXISTS public.secrets_vault (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   workspace_id UUID REFERENCES public.workspaces(id) ON DELETE CASCADE,
   name text NOT NULL,
@@ -200,7 +201,7 @@ CREATE TABLE public.secrets_vault (
 );
 
 -- WEBHOOKS
-CREATE TABLE public.webhooks (
+CREATE TABLE IF NOT EXISTS public.webhooks (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   workspace_id UUID REFERENCES public.workspaces(id) ON DELETE CASCADE,
   url text NOT NULL,
@@ -212,7 +213,7 @@ CREATE TABLE public.webhooks (
 );
 
 -- TEMPLATES
-CREATE TABLE public.templates (
+CREATE TABLE IF NOT EXISTS public.templates (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   slug text UNIQUE NOT NULL,
   name text NOT NULL,
@@ -225,14 +226,14 @@ CREATE TABLE public.templates (
 );
 
 -- BILLING / NOTIFICATIONS / AUDIT
-CREATE TABLE public.billing_events (
+CREATE TABLE IF NOT EXISTS public.billing_events (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   type text NOT NULL,
   payload jsonb,
   created_at timestamptz DEFAULT now()
 );
 
-CREATE TABLE public.notifications (
+CREATE TABLE IF NOT EXISTS public.notifications (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   user_id UUID NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
   type text NOT NULL,
@@ -243,7 +244,7 @@ CREATE TABLE public.notifications (
   created_at timestamptz DEFAULT now()
 );
 
-CREATE TABLE public.audit_log (
+CREATE TABLE IF NOT EXISTS public.audit_log (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   workspace_id UUID REFERENCES public.workspaces(id) ON DELETE CASCADE,
   actor_id UUID REFERENCES auth.users(id),
@@ -285,7 +286,28 @@ ALTER TABLE public.secrets_vault ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.webhooks ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.templates ENABLE ROW LEVEL SECURITY;
 
--- POLICIES
+-- POLICIES (drop first so re-runs don't fail)
+DO $$ BEGIN
+  DROP POLICY IF EXISTS "own profile" ON public.profiles;
+  DROP POLICY IF EXISTS "ws read" ON public.workspaces;
+  DROP POLICY IF EXISTS "ws owner write" ON public.workspaces;
+  DROP POLICY IF EXISTS "ws members read" ON public.workspace_members;
+  DROP POLICY IF EXISTS "projects scoped" ON public.projects;
+  DROP POLICY IF EXISTS "reviews via project" ON public.reviews;
+  DROP POLICY IF EXISTS "findings via review" ON public.review_findings;
+  DROP POLICY IF EXISTS "prs via project" ON public.pull_requests;
+  DROP POLICY IF EXISTS "agents scoped" ON public.agents;
+  DROP POLICY IF EXISTS "agent sessions via agent" ON public.agent_sessions;
+  DROP POLICY IF EXISTS "own sandboxes" ON public.editor_sandboxes;
+  DROP POLICY IF EXISTS "own files" ON public.editor_files;
+  DROP POLICY IF EXISTS "own keys" ON public.api_keys;
+  DROP POLICY IF EXISTS "own notifications" ON public.notifications;
+  DROP POLICY IF EXISTS "audit via workspace" ON public.audit_log;
+  DROP POLICY IF EXISTS "secrets admin" ON public.secrets_vault;
+  DROP POLICY IF EXISTS "webhooks admin" ON public.webhooks;
+  DROP POLICY IF EXISTS "templates public" ON public.templates;
+END $$;
+
 CREATE POLICY "own profile" ON public.profiles FOR ALL TO authenticated USING (id = auth.uid()) WITH CHECK (id = auth.uid());
 
 CREATE POLICY "ws read" ON public.workspaces FOR SELECT TO authenticated USING (public.is_workspace_member(id, auth.uid()));

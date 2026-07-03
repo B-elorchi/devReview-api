@@ -238,6 +238,27 @@ r.post("/link", requireAuth, async (req, res) => {
   res.json({ ok: true });
 });
 
+// Register webhook URL with Telegram — POST with { url: "https://your-public-url.com" }
+r.post("/register-webhook", requireAuth, async (req, res) => {
+  if (!env.TELEGRAM_BOT_TOKEN) return res.status(501).json({ error: "TELEGRAM_BOT_TOKEN not set" });
+  const { url } = z.object({ url: z.string().url() }).parse(req.body);
+  const webhookUrl = `${url}/integrations/telegram/webhook`;
+  const resp = await fetch(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/setWebhook`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ url: webhookUrl, secret_token: env.TELEGRAM_WEBHOOK_SECRET }),
+  });
+  const data = await resp.json();
+  res.json({ webhookUrl, telegram: data });
+});
+
+// Check current webhook info
+r.get("/webhook-info", requireAuth, async (_req, res) => {
+  if (!env.TELEGRAM_BOT_TOKEN) return res.status(501).json({ error: "TELEGRAM_BOT_TOKEN not set" });
+  const resp = await fetch(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/getWebhookInfo`);
+  res.json(await resp.json());
+});
+
 // Register bot commands with Telegram (call once after deploy)
 r.post("/setup-commands", requireAuth, async (_req, res) => {
   if (!env.TELEGRAM_BOT_TOKEN) return res.status(501).json({ error: "TELEGRAM_BOT_TOKEN not set" });
