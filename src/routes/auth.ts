@@ -105,8 +105,8 @@ r.get("/callback", async (req, res) => {
   const { data, error } = await supabaseAdmin.auth.exchangeCodeForSession(code);
   if (error) return res.redirect(`${appUrl}/auth?error=${encodeURIComponent(error.message)}`);
   
-  // Redirect back to frontend with the access_token in the query string
-  res.redirect(`${appUrl}/auth?token=${data.session.access_token}`);
+  // Redirect back to frontend with the access_token and refresh_token in the query string
+  res.redirect(`${appUrl}/auth?token=${data.session.access_token}&refresh_token=${data.session.refresh_token}`);
 });
 
 r.post("/session", requireAuth, async (req, res) => {
@@ -133,6 +133,16 @@ r.post("/update-password", async (req, res) => {
   if (updateError) return res.status(400).json({ error: updateError.message });
   
   res.json({ ok: true, session: data.session, user: data.user });
+});
+
+r.post("/refresh", async (req, res) => {
+  const { refresh_token } = req.body;
+  if (!refresh_token) return res.status(400).json({ error: "refresh_token is required" });
+
+  const { data, error } = await supabaseAdmin.auth.refreshSession({ refresh_token });
+  if (error || !data.session) return res.status(401).json({ error: error?.message || "Invalid refresh token" });
+
+  res.json({ session: data.session, user: data.user });
 });
 
 export default r;
