@@ -33,6 +33,25 @@ r.get("/sandboxes/:id/files", async (req, res) => {
 
 r.put("/sandboxes/:id/files", async (req, res) => {
   const body = z.object({ path: z.string().min(1), content: z.string() }).parse(req.body);
+  
+  // Ensure sandbox exists (auto-create if it's a project ID)
+  const { data: sandbox } = await supabaseAdmin.from("editor_sandboxes")
+    .select("id").eq("id", req.params.id).maybeSingle();
+    
+  if (!sandbox) {
+    const { data: project } = await supabaseAdmin.from("projects")
+      .select("id").eq("id", req.params.id).maybeSingle();
+      
+    if (project) {
+      await supabaseAdmin.from("editor_sandboxes").insert({
+        id: req.params.id,
+        project_id: req.params.id,
+        owner_id: req.user!.id,
+        status: "ready"
+      });
+    }
+  }
+
   const { error } = await supabaseAdmin.from("editor_files").upsert({
     sandbox_id: req.params.id, path: body.path, content: body.content,
     size: body.content.length, type: "file", updated_at: new Date().toISOString(),

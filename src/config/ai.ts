@@ -4,7 +4,7 @@ import { env } from "./env.js";
 // LangChain OpenRouter Configuration
 export const chatModel = new ChatOpenAI({
   modelName: env.AI_MODEL_DEFAULT,
-  openAIApiKey: env.OPENROUTER_API_KEY || "dummy", // Fallback to avoid crash if env missing during build
+  apiKey: env.OPENROUTER_API_KEY || "dummy", // Fix: use apiKey instead of openAIApiKey
   configuration: {
     baseURL: "https://openrouter.ai/api/v1",
     defaultHeaders: {

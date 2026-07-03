@@ -18,8 +18,8 @@ const schema = z.object({
   AI_GATEWAY_URL: z.string().url(),
   AI_GATEWAY_API_KEY: z.string().optional().default(""),
   OPENROUTER_API_KEY: z.string().optional().default(""),
-  AI_MODEL_DEFAULT: z.string().default("anthropic/claude-3.5-sonnet"),
-  AI_MODEL_REVIEW: z.string().default("anthropic/claude-3.5-sonnet"),
+  AI_MODEL_DEFAULT: z.string().default("openai/gpt-4.1-mini"),
+  AI_MODEL_REVIEW: z.string().default("openai/gpt-4.1-mini"),
 
   GITHUB_TOKEN: z.string().optional().default(""),
   GITHUB_APP_ID: z.string().optional().default(""),
