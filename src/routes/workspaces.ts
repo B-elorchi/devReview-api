@@ -4,6 +4,7 @@ import { z } from "zod";
 import { requireAuth } from "../middleware/auth.js";
 import { supabaseAdmin } from "../config/supabase.js";
 import { sendTeamInviteEmail } from "../services/email.js";
+import { enqueueNotification, enqueueNotifications } from "../services/notifications.js";
 
 const r = Router();
 r.use(requireAuth);
@@ -40,6 +41,13 @@ r.post("/", async (req, res) => {
   if (error) throw error;
   await supabaseAdmin.from("workspace_members").insert({
     workspace_id: ws.id, user_id: req.user!.id, role: "owner",
+  });
+  await enqueueNotification({
+    userId: req.user!.id,
+    type: "team",
+    title: "Workspace created",
+    body: `${ws.name} is ready for projects and team members.`,
+    link: "/team",
   });
   res.status(201).json({ workspace: ws });
 });
@@ -119,6 +127,13 @@ r.post("/:id/members/invite", async (req, res) => {
     target = created.user;
     createdAccount = true;
   }
+  
+  const { error } = await supabaseAdmin.from("workspace_members").upsert({
+    workspace_id: req.params.id,
+    user_id: target.id,
+    role: body.role,
+  }, { onConflict: "workspace_id,user_id" });
+  if (error) throw error;
 
   const { error: profileError } = await supabaseAdmin.from("profiles").upsert({
     id: target.id,
@@ -127,19 +142,13 @@ r.post("/:id/members/invite", async (req, res) => {
   }, { onConflict: "id", ignoreDuplicates: true });
   if (profileError) throw profileError;
 
-  const { error } = await supabaseAdmin.from("workspace_members").upsert({
-    workspace_id: req.params.id,
-    user_id: target.id,
-    role: body.role,
-  }, { onConflict: "workspace_id,user_id" });
-  if (error) throw error;
-
   const { data: workspace, error: workspaceError } = await supabaseAdmin
     .from("workspaces")
     .select("name")
     .eq("id", req.params.id)
     .maybeSingle();
   if (workspaceError) throw workspaceError;
+  const workspaceName = workspace?.name ?? "your team";
   if (createdAccount) {
     const appUrl = process.env.APP_URL || "http://localhost:8080";
     const { data: linkData, error: linkError } = await supabaseAdmin.auth.admin.generateLink({
@@ -150,10 +159,28 @@ r.post("/:id/members/invite", async (req, res) => {
 
     if (!linkError && linkData?.properties?.hashed_token) {
       const actionLink = `${appUrl}/update-password?token=${linkData.properties.hashed_token}`;
-      await sendTeamInviteEmail(body.email, actionLink, workspace?.name ?? "your team");
+      await sendTeamInviteEmail(body.email, actionLink, workspaceName);
     }
   }
 
+  await enqueueNotifications([
+    {
+      userId: target.id,
+      type: "team",
+      title: createdAccount ? "Account created and team invite sent" : "You were added to a workspace",
+      body: createdAccount
+        ? `Your DevReview AI account was created and you were invited to ${workspaceName}. Use the email link to set your password.`
+        : `You were added to ${workspaceName} as ${body.role}.`,
+      link: "/team",
+    },
+    {
+      userId: req.user!.id,
+      type: "success",
+      title: "Team invite sent",
+      body: `${body.email} was added to ${workspaceName} as ${body.role}.`,
+      link: "/team",
+    },
+  ]);
   res.status(201).json({ status: createdAccount ? "created" : "added", user_id: target.id });
 });
 
@@ -165,6 +192,13 @@ r.patch("/:id/members/:userId/role", async (req, res) => {
     .eq("workspace_id", req.params.id)
     .eq("user_id", req.params.userId);
   if (error) throw error;
+  await enqueueNotification({
+    userId: req.params.userId,
+    type: "team",
+    title: "Workspace role updated",
+    body: `Your role was changed to ${role}.`,
+    link: "/team",
+  });
   res.json({ ok: true });
 });
 
@@ -175,6 +209,13 @@ r.delete("/:id/members/:userId", async (req, res) => {
     .eq("workspace_id", req.params.id)
     .eq("user_id", req.params.userId);
   if (error) throw error;
+  await enqueueNotification({
+    userId: req.params.userId,
+    type: "team",
+    title: "Removed from workspace",
+    body: "You were removed from a DevReview AI workspace.",
+    link: "/team",
+  });
   res.status(204).end();
 });
 

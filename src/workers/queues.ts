@@ -6,3 +6,4 @@ export const reviewQueue = new Queue("review", { connection });
 export const githubSyncQueue = new Queue("github.sync", { connection });
 export const editorReaperQueue = new Queue("editor.reaper", { connection });
 export const telegramQueue = new Queue("telegram", { connection });
+export const notificationQueue = new Queue("notification", { connection });
