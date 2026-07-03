@@ -3,6 +3,7 @@ import { z } from "zod";
 import { requireAuth, requireWorkspace } from "../middleware/auth.js";
 import { supabaseAdmin } from "../config/supabase.js";
 import { env } from "../config/env.js";
+import { enqueueNotification } from "../services/notifications.js";
 
 const r = Router();
 r.use(requireAuth, requireWorkspace);
@@ -111,6 +112,13 @@ r.post("/", async (req, res) => {
     ...body, workspace_id: req.workspaceId!, created_by: req.user!.id,
   }).select().single();
   if (error) throw error;
+  await enqueueNotification({
+    userId: req.user!.id,
+    type: "project",
+    title: "Project created",
+    body: `${data.name} was added to your workspace.`,
+    link: `/projects/${data.id}`,
+  });
   res.status(201).json({ project: data });
 });
 

@@ -129,53 +129,63 @@ r.get("/reports", async (req, res) => {
     months.push(`${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`);
   }
 
-  // Review trend: count reviews per month
-  const { data: reviewRows } = await supabaseAdmin
-    .from("reviews")
-    .select("created_at, status")
+  const monthStart = new Date(now.getFullYear(), now.getMonth() - 11, 1).toISOString();
+
+  const { data: projects, error: projectsError } = await supabaseAdmin
+    .from("projects")
+    .select("id, name, health_score")
     .eq("workspace_id", wsId)
-    .gte("created_at", new Date(now.getFullYear(), now.getMonth() - 11, 1).toISOString());
+    .order("updated_at", { ascending: false });
+  if (projectsError) throw projectsError;
+
+  const projectIds = (projects ?? []).map((project) => project.id);
+
+  const { data: reviewRows, error: reviewsError } = projectIds.length
+    ? await supabaseAdmin
+        .from("reviews")
+        .select("id, created_at, status, project_id")
+        .in("project_id", projectIds)
+        .gte("created_at", monthStart)
+    : { data: [], error: null };
+  if (reviewsError) throw reviewsError;
 
   const reviewByMonth: Record<string, number> = {};
   for (const row of reviewRows ?? []) {
     const key = row.created_at.slice(0, 7);
     reviewByMonth[key] = (reviewByMonth[key] ?? 0) + 1;
   }
-  const reviewTrend = months.map((m) => ({ month: m, reviews: reviewByMonth[m] ?? 0 }));
+  const reviewTrend = months.map((month) => ({ month, reviews: reviewByMonth[month] ?? 0 }));
 
-  // Security findings by severity
-  const { data: findingRows } = await supabaseAdmin
-    .from("review_findings")
-    .select("severity")
-    .in(
-      "review_id",
-      (reviewRows ?? []).map((r: any) => r.id).filter(Boolean),
-    );
+  const reviewIds = (reviewRows ?? []).map((review) => review.id);
+  const { data: findingRows, error: findingsError } = reviewIds.length
+    ? await supabaseAdmin
+        .from("review_findings")
+        .select("severity")
+        .in("review_id", reviewIds)
+    : { data: [], error: null };
+  if (findingsError) throw findingsError;
 
   const sevCounts: Record<string, number> = { critical: 0, high: 0, medium: 0, low: 0 };
-  for (const f of findingRows ?? []) {
-    if (f.severity in sevCounts) sevCounts[f.severity]++;
+  for (const finding of findingRows ?? []) {
+    if (finding.severity in sevCounts) sevCounts[finding.severity]++;
   }
   const security = Object.entries(sevCounts).map(([severity, count]) => ({ severity, count }));
 
-  // Quality score per project (use health_score)
-  const { data: projects } = await supabaseAdmin
-    .from("projects")
-    .select("id, name, health_score")
-    .eq("workspace_id", wsId)
-    .limit(6);
-  const quality = (projects ?? []).map((p: any) => ({ project: p.name, score: p.health_score ?? 0 }));
+  const quality = (projects ?? []).slice(0, 6).map((project: any) => ({
+    project: project.name,
+    score: project.health_score ?? 0,
+  }));
 
-  // Agent usage this month — agent_sessions joins through agents.workspace_id
-  const { data: agentSessions } = await supabaseAdmin
+  const { data: agentSessions, error: agentSessionsError } = await supabaseAdmin
     .from("agent_sessions")
     .select("agent_id, agents!inner(name, workspace_id)")
     .eq("agents.workspace_id", wsId)
     .gte("started_at", new Date(now.getFullYear(), now.getMonth(), 1).toISOString());
+  if (agentSessionsError) throw agentSessionsError;
 
   const agentCounts: Record<string, number> = {};
-  for (const s of agentSessions ?? []) {
-    const name = (s as any).agents?.name ?? "Unknown";
+  for (const session of agentSessions ?? []) {
+    const name = (session as any).agents?.name ?? "Unknown";
     agentCounts[name] = (agentCounts[name] ?? 0) + 1;
   }
   const agentUsage = Object.entries(agentCounts).map(([agent, runs]) => ({ agent, runs }));

@@ -54,10 +54,11 @@ export function createApp() {
 
   // Webhook routes need raw body — mount BEFORE express.json().
   app.use("/api/v1/integrations/github", github);
-  app.use("/api/v1/billing", billing);
 
   app.use(express.json({ limit: "2mb" }));
   app.use(apiLimiter);
+
+  app.use("/api/v1/billing", billing);
 
   app.use("/api/v1/auth", auth);
   app.use("/api/v1/workspaces", workspaces);

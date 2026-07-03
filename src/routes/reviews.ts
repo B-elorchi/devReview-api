@@ -3,6 +3,7 @@ import { z } from "zod";
 import { requireAuth, requireWorkspace } from "../middleware/auth.js";
 import { supabaseAdmin } from "../config/supabase.js";
 import { reviewQueue } from "../workers/queues.js";
+import { enqueueNotification } from "../services/notifications.js";
 
 const r = Router();
 r.use(requireAuth, requireWorkspace);
@@ -34,6 +35,13 @@ r.post("/projects/:id/reviews", async (req, res) => {
   if (error) throw error;
 
   await reviewQueue.add("run", { reviewId: review.id, diff: body.diff });
+  await enqueueNotification({
+    userId: req.user!.id,
+    type: "review",
+    title: "Review queued",
+    body: `Review for ${body.ref} is waiting to run.`,
+    link: `/code-review`,
+  });
   res.status(202).json({ review });
 });
 
