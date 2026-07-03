@@ -5,7 +5,7 @@ import { requireAuth, requireWorkspace } from "../middleware/auth.js";
 import { supabaseAdmin } from "../config/supabase.js";
 
 const r = Router();
-const stripe = env.STRIPE_SECRET_KEY ? new Stripe(env.STRIPE_SECRET_KEY) : null;
+const stripe = process.env.STRIPE_WEBHOOK_SECRET ? new Stripe(process.env.STRIPE_WEBHOOK_SECRET) : null;
 
 const PLANS = [
   {
@@ -53,23 +53,88 @@ r.get("/subscription", requireAuth, requireWorkspace, async (req, res) => {
 
 // GET /billing/invoices
 r.get("/invoices", requireAuth, requireWorkspace, async (req, res) => {
-  const { data, error } = await supabaseAdmin
+  let stripeInvoices: any[] = [];
+
+  // Try Stripe first
+  if (stripe) {
+    const { data: profile } = await supabaseAdmin.from("profiles")
+      .select("stripe_customer_id").eq("id", req.user!.id).single();
+
+    if (profile?.stripe_customer_id) {
+      try {
+        const result = await stripe.invoices.list({
+          customer: profile.stripe_customer_id,
+          limit: 20,
+        });
+        stripeInvoices = result.data.map((inv) => ({
+          id: inv.id,
+          date: new Date(inv.created * 1000).toISOString(),
+          amount: inv.amount_paid,
+          currency: inv.currency,
+          status: inv.status === "paid" ? "paid" : "pending",
+          pdf: inv.invoice_pdf,
+        }));
+      } catch (err) {
+        console.error("Failed to fetch Stripe invoices", err);
+      }
+    }
+  }
+
+  // Fall back to billing_events table (captures mock payments + webhook events)
+  const { data: events } = await supabaseAdmin
     .from("billing_events")
     .select("id, type, payload, created_at")
     .eq("type", "invoice.payment_succeeded")
     .order("created_at", { ascending: false })
     .limit(20);
-  if (error) throw error;
 
-  const invoices = (data ?? []).map((row: any) => ({
+  const localInvoices = (events ?? []).map((row: any) => ({
     id: row.id,
     date: row.created_at,
-    amount: row.payload?.data?.object?.amount_paid ?? 0,
-    currency: row.payload?.data?.object?.currency ?? "usd",
+    amount: row.payload?.amount ?? row.payload?.data?.object?.amount_paid ?? 0,
+    currency: row.payload?.currency ?? row.payload?.data?.object?.currency ?? "usd",
     status: "paid",
     pdf: row.payload?.data?.object?.invoice_pdf ?? null,
   }));
-  res.json({ invoices });
+
+  // Merge — Stripe invoices first, then local events (deduplicated by id)
+  const seenIds = new Set(stripeInvoices.map((i) => i.id));
+  const merged = [...stripeInvoices, ...localInvoices.filter((i) => !seenIds.has(i.id))];
+
+  res.json({ invoices: merged });
+});
+
+r.get("/payment-method", requireAuth, async (req, res) => {
+  if (!stripe) return res.json({ method: null });
+
+  const { data: profile } = await supabaseAdmin.from("profiles")
+    .select("stripe_customer_id").eq("id", req.user!.id).single();
+
+  if (!profile?.stripe_customer_id) return res.json({ method: null });
+
+  try {
+    const paymentMethods = await stripe.paymentMethods.list({
+      customer: profile.stripe_customer_id,
+      type: "card",
+      limit: 1,
+    });
+
+    if (paymentMethods.data.length > 0) {
+      const card = paymentMethods.data[0].card;
+      return res.json({
+        method: {
+          brand: card?.brand,
+          last4: card?.last4,
+          exp_month: card?.exp_month,
+          exp_year: card?.exp_year
+        }
+      });
+    }
+  } catch (err) {
+    console.error("Failed to fetch payment method", err);
+  }
+
+  res.json({ method: null });
 });
 
 // GET /billing/usage
@@ -106,11 +171,26 @@ r.post("/stripe/checkout", requireAuth, requireWorkspace, async (req, res) => {
 
   try {
     let priceId = "";
-    if (plan === "pro") priceId = "price_pro_placeholder";
-    else if (plan === "team") priceId = "price_team_placeholder";
+    if (plan === "pro") priceId = process.env.STRIPE_PRO_PRICE_ID || "price_pro_placeholder";
+    else if (plan === "team") priceId = process.env.STRIPE_TEAM_PRICE_ID || "price_team_placeholder";
     else return res.status(400).json({ error: "Invalid plan selected" });
 
-    // Ensure we have a customer
+    // If no real price IDs are configured, mock a successful redirect
+    if (priceId.includes("placeholder")) {
+      const planData = PLANS.find((p) => p.id === plan)!;
+      await supabaseAdmin.from("billing_events").insert({
+        type: "invoice.payment_succeeded",
+        payload: {
+          mock: true,
+          plan: plan,
+          amount: planData.price * 100,
+          currency: "usd",
+        },
+      });
+      await supabaseAdmin.from("workspaces").update({ plan }).eq("id", workspaceId);
+      return res.json({ url: `${env.APP_URL}/billing?success=true&mock=true` });
+    }
+
     const { data: profile } = await supabaseAdmin.from("profiles")
       .select("stripe_customer_id").eq("id", req.user!.id).single();
 
@@ -120,8 +200,8 @@ r.post("/stripe/checkout", requireAuth, requireWorkspace, async (req, res) => {
       customer: profile?.stripe_customer_id || undefined,
       line_items: [{ price: priceId, quantity: 1 }],
       client_reference_id: workspaceId,
-      success_url: `${env.APP_URL}/pricing?success=true`,
-      cancel_url: `${env.APP_URL}/pricing?canceled=true`,
+      success_url: `${env.APP_URL}/billing?success=true`,
+      cancel_url: `${env.APP_URL}/billing?canceled=true`,
     });
 
     res.json({ url: session.url });
@@ -134,14 +214,31 @@ r.post("/stripe/checkout", requireAuth, requireWorkspace, async (req, res) => {
 r.get("/portal", requireAuth, async (req, res) => {
   if (!stripe) return res.status(503).json({ error: "Stripe not configured" });
   const { data: profile } = await supabaseAdmin.from("profiles")
-    .select("stripe_customer_id").eq("id", req.user!.id).single();
-  if (!profile?.stripe_customer_id) return res.status(404).json({ error: "No customer" });
-  
-  const session = await stripe.billingPortal.sessions.create({
-    customer: profile.stripe_customer_id,
-    return_url: `${env.APP_URL}/pricing`,
-  });
-  res.json({ url: session.url });
+    .select("stripe_customer_id, email").eq("id", req.user!.id).single();
+
+  let customerId = profile?.stripe_customer_id;
+
+  if (!customerId) {
+    try {
+      const customer = await stripe.customers.create({
+        email: req.user!.email,
+      });
+      customerId = customer.id;
+      await supabaseAdmin.from("profiles").update({ stripe_customer_id: customerId }).eq("id", req.user!.id);
+    } catch (err: any) {
+      return res.status(400).json({ error: err.message || "Failed to create Stripe customer" });
+    }
+  }
+
+  try {
+    const session = await stripe.billingPortal.sessions.create({
+      customer: customerId,
+      return_url: `${env.APP_URL}/pricing`,
+    });
+    res.json({ url: session.url });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
 // Stripe Webhook
@@ -159,7 +256,7 @@ r.post("/webhook", raw({ type: "*/*" }), async (req, res) => {
     const session = event.data.object as Stripe.Checkout.Session;
     const workspaceId = session.client_reference_id;
     if (workspaceId) {
-       await supabaseAdmin.from("workspaces").update({ plan: "pro" }).eq("id", workspaceId);
+      await supabaseAdmin.from("workspaces").update({ plan: "pro" }).eq("id", workspaceId);
     }
   }
 
@@ -218,7 +315,7 @@ r.post("/paypal/capture-order", requireAuth, requireWorkspace, async (req, res) 
       },
     });
     const captureData = await response.json();
-    
+
     if (captureData.status === "COMPLETED") {
       await supabaseAdmin.from("workspaces").update({ plan: plan || "pro" }).eq("id", req.workspaceId!);
     }
