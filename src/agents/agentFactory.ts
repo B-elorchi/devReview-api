@@ -125,20 +125,12 @@ export async function runAgent({
   // streamMode:"messages" emits 2-tuples: [BaseMessage|AIMessageChunk, metadata]
   let full = "";
 
-  // streamMode "messages" emits [message, metadata] tuples.
   const stream = await agent.stream({ messages }, { streamMode: "messages" });
-
-  let full = "";
 
   for await (const [chunk, _meta] of stream) {
     // Accept AIMessageChunk (streaming tokens) and AIMessage (final node output)
     const isAI = chunk instanceof AIMessage || chunk instanceof AIMessageChunk;
     if (!isAI) continue;
-  for await (const item of stream) {
-    const chunk = Array.isArray(item) ? item[0] : item;
-
-    // Only forward AIMessage chunks that carry plain text (skip ToolMessage and tool_call chunks)
-    if (!(chunk instanceof AIMessage)) continue;
 
     // Skip tool-call invocation chunks (contain function args, no text yet)
     if (Array.isArray((chunk as any).tool_calls) && (chunk as any).tool_calls.length > 0) continue;

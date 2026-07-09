@@ -2,7 +2,7 @@ import { Router } from "express";
 import { z } from "zod";
 import { requireAuth, requireWorkspace } from "../middleware/auth.js";
 import { supabaseAdmin } from "../config/supabase.js";
-import { reviewQueue } from "../workers/queues.js";
+import { runReviewJob } from "../services/review.js";
 import { enqueueNotification } from "../services/notifications.js";
 
 const r = Router();
@@ -34,15 +34,12 @@ r.post("/projects/:id/reviews", async (req, res) => {
   }).select().single();
   if (error) throw error;
 
-  await reviewQueue.add("run", { reviewId: review.id, diff: body.diff });
-  await enqueueNotification({
-    userId: req.user!.id,
-    type: "review",
-    title: "Review queued",
-    body: `Review for ${body.ref} is waiting to run.`,
-    link: `/code-review`,
-  });
+  // Run inline (no Redis/BullMQ required) — respond immediately then process
   res.status(202).json({ review });
+  // Fire and forget — errors are caught inside runReviewJob
+  runReviewJob({ reviewId: review.id, diff: body.diff }).catch((err) => {
+    console.error("Review job error", err);
+  });
 });
 
 r.get("/reviews/:id", async (req, res) => {

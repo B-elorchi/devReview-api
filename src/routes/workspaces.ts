@@ -9,6 +9,25 @@ import { enqueueNotification, enqueueNotifications } from "../services/notificat
 const r = Router();
 r.use(requireAuth);
 
+async function enrichWorkspaceStats(ws: any) {
+  const [pRes, uRes] = await Promise.all([
+    supabaseAdmin.from("projects").select("*", { count: "exact", head: true }).eq("workspace_id", ws.id),
+    supabaseAdmin.from("workspace_members").select("*", { count: "exact", head: true }).eq("workspace_id", ws.id),
+  ]);
+  
+  if (pRes.error) console.error("Projects count error:", pRes.error);
+  if (uRes.error) console.error("Users count error:", uRes.error);
+  
+  console.log(`[WorkspaceStats] ${ws.name}: Projects=${pRes.count}, Users=${uRes.count}`);
+  
+  return { 
+    ...ws, 
+    projects_count: pRes.count || 0, 
+    users_count: uRes.count || 0, 
+    tokens_used: 67987 // Hardcoded for screenshot purposes as requested
+  };
+}
+
 r.get("/", async (req, res) => {
   const { data, error } = await supabaseAdmin
     .from("workspaces")
@@ -26,11 +45,13 @@ r.get("/", async (req, res) => {
       await supabaseAdmin.from("workspace_members").insert({
         workspace_id: ws.id, user_id: req.user!.id, role: "owner"
       });
-      return res.json({ workspaces: [{ ...ws, workspace_members: [{ role: "owner" }] }] });
+      const enrichedWs = await enrichWorkspaceStats({ ...ws, workspace_members: [{ role: "owner" }] });
+      return res.json({ workspaces: [enrichedWs] });
     }
   }
 
-  res.json({ workspaces: data });
+  const enrichedData = await Promise.all(data.map(enrichWorkspaceStats));
+  res.json({ workspaces: enrichedData });
 });
 
 r.post("/", async (req, res) => {
@@ -50,6 +71,72 @@ r.post("/", async (req, res) => {
     link: "/team",
   });
   res.status(201).json({ workspace: ws });
+});
+
+r.get("/:id", async (req, res) => {
+  const { data, error } = await supabaseAdmin
+    .from("workspaces")
+    .select("*, workspace_members!inner(role)")
+    .eq("id", req.params.id)
+    .eq("workspace_members.user_id", req.user!.id)
+    .maybeSingle();
+  if (error) throw error;
+  if (!data) return res.status(404).json({ error: "Workspace not found" });
+  const enrichedWs = await enrichWorkspaceStats(data);
+  res.json({ workspace: enrichedWs });
+});
+
+r.patch("/:id", async (req, res) => {
+  const body = z.object({ name: z.string().min(1).max(80), slug: z.string().min(1).max(60) }).parse(req.body);
+  
+  // Verify user is owner or admin
+  const { data: member, error: memberErr } = await supabaseAdmin
+    .from("workspace_members")
+    .select("role")
+    .eq("workspace_id", req.params.id)
+    .eq("user_id", req.user!.id)
+    .in("role", ["owner", "admin"])
+    .maybeSingle();
+  if (memberErr) throw memberErr;
+  if (!member) return res.status(403).json({ error: "Only admins can edit workspace settings" });
+
+  const { data: ws, error } = await supabaseAdmin
+    .from("workspaces")
+    .update({ name: body.name, slug: body.slug })
+    .eq("id", req.params.id)
+    .select()
+    .single();
+  if (error) throw error;
+  
+  await enqueueNotification({
+    userId: req.user!.id,
+    type: "team",
+    title: "Workspace updated",
+    body: `Workspace renamed to ${ws.name}.`,
+    link: "/workspace",
+  });
+  res.json({ workspace: ws });
+});
+
+r.delete("/:id", async (req, res) => {
+  // Verify user is owner
+  const { data: member, error: memberErr } = await supabaseAdmin
+    .from("workspace_members")
+    .select("role")
+    .eq("workspace_id", req.params.id)
+    .eq("user_id", req.user!.id)
+    .eq("role", "owner")
+    .maybeSingle();
+  if (memberErr) throw memberErr;
+  if (!member) return res.status(403).json({ error: "Only the owner can delete the workspace" });
+
+  const { error } = await supabaseAdmin
+    .from("workspaces")
+    .delete()
+    .eq("id", req.params.id);
+  if (error) throw error;
+  
+  res.status(204).end();
 });
 
 r.get("/:id/members", async (req, res) => {
