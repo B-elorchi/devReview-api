@@ -2,8 +2,7 @@ module.exports = {
   apps: [
     {
       name: "devreview-api",
-      script: "npm",
-      args: "run start",
+      script: "dist/server.js",
       cwd: "./",
       instances: 1,
       autorestart: true,
@@ -15,8 +14,8 @@ module.exports = {
     },
     {
       name: "devreview-worker",
-      script: "npm",
-      args: "run worker",
+      script: "./node_modules/.bin/tsx",
+      args: "src/workers/index.ts",
       cwd: "./",
       instances: 1,
       autorestart: true,
