@@ -52,6 +52,7 @@ const AGENT_COMMANDS: Record<string, { agentType: AgentType; label: string; emoj
   sec:          { agentType: "security",     label: "Security",     emoji: "🔒" },
   devops:       { agentType: "dev",          label: "DevOps",       emoji: "🚀" },
   dev:          { agentType: "dev",          label: "DevOps",       emoji: "🚀" },
+  platform:     { agentType: "platform-assistant", label: "Platform Assistant", emoji: "🧠" },
 };
 
 const HELP_TEXT = `*DevReview AI Bot* 🤖
@@ -63,6 +64,7 @@ I'm your AI code assistant. Send me code and I'll analyse it.
 /quality — ⚡ Code quality & architecture (SOLID, complexity, DRY)
 /security — 🔒 Security scan (OWASP Top 10, vulnerabilities, CWEs)
 /devops — 🚀 DevOps & infrastructure (Docker, CI/CD, Kubernetes, Terraform)
+/platform — 🧠 Platform Assistant (Manage projects, trigger reviews, edit code)
 
 *How to use:*
 1. Send a slash command to set the active agent
@@ -184,6 +186,7 @@ async function runAgentAndReply(chatId: string, state: ChatState, userText: stri
       agentType:   state.agentType,
       message:     userText,
       history:     state.history,
+      userId:      userId,
       onChunk:     () => {}, // streaming not needed for Telegram — use return value
     });
 
@@ -283,6 +286,7 @@ r.post("/setup-commands", requireAuth, async (_req, res) => {
         { command: "quality",    description: "⚡ Code quality & architecture — SOLID, complexity, DRY" },
         { command: "security",   description: "🔒 Security scan — OWASP Top 10, vulnerabilities, CWEs" },
         { command: "devops",     description: "🚀 DevOps analysis — Docker, CI/CD, Kubernetes, Terraform" },
+        { command: "platform",   description: "🧠 Platform Assistant — Manage projects, trigger reviews, edit code" },
         { command: "help",       description: "Show all available commands" },
       ],
     }),

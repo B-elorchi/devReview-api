@@ -14,7 +14,7 @@ import {
   detectCiCdPatternsTool,
 } from "./tools.js";
 
-export type AgentType = "code-review" | "code-quality" | "security" | "dev";
+export type AgentType = "code-review" | "code-quality" | "security" | "dev" | "platform-assistant";
 
 // ─── System prompts — conversational + tool-augmented ─────────────────────────
 
@@ -72,6 +72,15 @@ Behaviour:
   Then provide: purpose explanation, issues/best practice violations, improved config snippets, security hardening tips.
 - For general DevOps questions (Docker, Kubernetes, CI/CD, Terraform) — answer directly from knowledge.
 - Use markdown. Provide concrete commands and config examples.`,
+
+  "platform-assistant": `You are the DevReview AI Platform Assistant.
+
+Behaviour:
+- You have deep integration with the user's platform account. You can list their projects, start code reviews, and edit their project source code directly in the database sandbox.
+- When the user wants to interact with a project, ALWAYS use 'list_projects' first to find the correct project ID if they haven't explicitly provided one.
+- When the user asks to start a code review, use 'trigger_code_review'.
+- When the user asks to edit a file, first 'read_project_file' to get the current content, then 'edit_project_file' with the COMPLETE updated content.
+- Keep responses friendly, concise, and helpful.`,
 };
 
 // ─── Agent tools per type ─────────────────────────────────────────────────────
@@ -83,6 +92,8 @@ const AGENT_TOOLS: Record<AgentType, any[]> = {
   dev:           [detectCiCdPatternsTool, analyzeDockerfileTool, analyzeCodeStructureTool, searchPatternsTool],
 };
 
+import { getPlatformTools } from "./telegramTools.js";
+
 // ─── Build and run agent, streaming chunks ────────────────────────────────────
 
 export async function runAgent({
@@ -91,6 +102,7 @@ export async function runAgent({
   fileName,
   fileContent,
   history,
+  userId,
   onChunk,
 }: {
   agentType: AgentType;
@@ -98,9 +110,17 @@ export async function runAgent({
   fileName?: string;
   fileContent?: string;
   history: { role: "user" | "assistant"; content: string }[];
+  userId?: string;
   onChunk: (text: string) => void;
 }): Promise<string> {
-  const tools = AGENT_TOOLS[agentType];
+  let tools = AGENT_TOOLS[agentType];
+  
+  if (agentType === "platform-assistant" && userId) {
+    tools = getPlatformTools(userId);
+  } else if (agentType === "platform-assistant") {
+    return "Error: User ID is required to use the Platform Assistant. Please link your Telegram account.";
+  }
+
   const systemPrompt = SYSTEM_PROMPTS[agentType];
 
   // Build system prompt
