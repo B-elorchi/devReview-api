@@ -6,9 +6,8 @@ import { runReviewJob } from "../services/review.js";
 import { enqueueNotification } from "../services/notifications.js";
 
 const r = Router();
-r.use(requireAuth, requireWorkspace);
 
-r.get("/reviews", async (req, res) => {
+r.get("/reviews", requireAuth, requireWorkspace, async (req, res) => {
   let q = supabaseAdmin
     .from("reviews")
     .select("*, review_findings(*), projects!inner(name, workspace_id)")
@@ -21,7 +20,7 @@ r.get("/reviews", async (req, res) => {
   res.json({ data });
 });
 
-r.post("/projects/:id/reviews", async (req, res) => {
+r.post("/projects/:id/reviews", requireAuth, requireWorkspace, async (req, res) => {
   const body = z.object({
     ref: z.string().default("HEAD"),
     pr_number: z.number().optional(),
@@ -42,7 +41,7 @@ r.post("/projects/:id/reviews", async (req, res) => {
   });
 });
 
-r.get("/reviews/:id", async (req, res) => {
+r.get("/reviews/:id", requireAuth, requireWorkspace, async (req, res) => {
   const { data, error } = await supabaseAdmin.from("reviews")
     .select("*, review_findings(*)").eq("id", req.params.id).maybeSingle();
   if (error) throw error;
@@ -50,7 +49,7 @@ r.get("/reviews/:id", async (req, res) => {
   res.json({ review: data });
 });
 
-r.get("/projects/:id/pull-requests", async (req, res) => {
+r.get("/projects/:id/pull-requests", requireAuth, requireWorkspace, async (req, res) => {
   const { data, error } = await supabaseAdmin.from("pull_requests")
     .select("*").eq("project_id", req.params.id).order("updated_at", { ascending: false });
   if (error) throw error;
