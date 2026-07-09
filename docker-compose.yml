@@ -5,10 +5,10 @@ services:
     build: .
     restart: unless-stopped
     ports:
-      - "4001:4001"
+      - "4002:4002"
     env_file: .env
     environment:
-      - PORT=4001
+      - PORT=4002
       - NODE_ENV=production
       - REDIS_URL=redis://redis:6379
     depends_on:
