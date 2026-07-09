@@ -90,6 +90,7 @@ const AGENT_TOOLS: Record<AgentType, any[]> = {
   "code-quality": [analyzeCodeStructureTool, measureComplexityTool, checkSolidPrinciplesTool, extractFunctionsTool],
   security:      [scanVulnerabilitiesTool, checkDependencyRisksTool, searchPatternsTool, analyzeCodeStructureTool],
   dev:           [detectCiCdPatternsTool, analyzeDockerfileTool, analyzeCodeStructureTool, searchPatternsTool],
+  "platform-assistant": [], // Populated dynamically in runAgent
 };
 
 import { getPlatformTools } from "./telegramTools.js";
