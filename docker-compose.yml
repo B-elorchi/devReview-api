@@ -11,6 +11,15 @@ services:
       - PORT=4002
       - NODE_ENV=production
       - REDIS_URL=redis://redis:6379
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.devreviewapi.rule=Host(`devreview-api.elorchi.com`)"
+      - "traefik.http.services.devreviewapi.loadbalancer.server.port=4002"
+      - "traefik.http.routers.devreviewapi.entrypoints=websecure"
+      - "traefik.http.routers.devreviewapi.tls.certresolver=letsencrypt"
+    networks:
+      - dokploy-network
+      - default
     depends_on:
       - redis
 
@@ -33,3 +42,7 @@ services:
 
 volumes:
   redis_data:
+
+networks:
+  dokploy-network:
+    external: true
