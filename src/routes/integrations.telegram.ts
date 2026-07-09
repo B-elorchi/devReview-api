@@ -161,6 +161,14 @@ async function runAgentAndReply(chatId: string, state: ChatState, userText: stri
   const agentCfg = Object.values(AGENT_COMMANDS).find(a => a.agentType === state.agentType)
     ?? { label: "Code Review", emoji: "🔍" };
 
+  // Lookup user to log messages
+  const { data: link } = await supabaseAdmin.from("telegram_links").select("user_id").eq("chat_id", chatId).maybeSingle();
+  const userId = link?.user_id;
+
+  if (userId) {
+    await supabaseAdmin.from("telegram_messages").insert({ user_id: userId, chat_id: chatId, direction: "inbound", text: userText });
+  }
+
   // Typing indicator
   if (env.TELEGRAM_BOT_TOKEN) {
     await fetch(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/sendChatAction`, {
@@ -194,6 +202,10 @@ async function runAgentAndReply(chatId: string, state: ChatState, userText: stri
   }
 
   await tgSendLong(chatId, response);
+  
+  if (userId) {
+    await supabaseAdmin.from("telegram_messages").insert({ user_id: userId, chat_id: chatId, direction: "outbound", text: response });
+  }
 }
 
 // ─── REST routes ──────────────────────────────────────────────────────────────
@@ -292,6 +304,35 @@ r.post("/webhook", async (req, res) => {
   processUpdate(req.body).catch((err) =>
     console.error("Telegram processUpdate error", err)
   );
+});
+
+r.get("/messages", requireAuth, async (req, res) => {
+  const { data, error } = await supabaseAdmin.from("telegram_messages")
+    .select("*").eq("user_id", req.user!.id).order("created_at", { ascending: true }).limit(100);
+  res.json({ messages: data || [] });
+});
+
+r.post("/messages", requireAuth, async (req, res) => {
+  const { text } = z.object({ text: z.string().min(1) }).parse(req.body);
+  const { data: link } = await supabaseAdmin.from("telegram_links")
+    .select("chat_id").eq("user_id", req.user!.id).maybeSingle();
+  if (!link) return res.status(400).json({ error: "Not linked" });
+
+  await tgSend(link.chat_id, text);
+  const { data: msg } = await supabaseAdmin.from("telegram_messages").insert({
+    user_id: req.user!.id, chat_id: link.chat_id, direction: "outbound", text
+  }).select().single();
+  res.json({ message: msg });
+});
+
+r.get("/preferences", requireAuth, async (req, res) => {
+  const { data } = await supabaseAdmin.from("notification_preferences").select("*").eq("user_id", req.user!.id).maybeSingle();
+  res.json({ preferences: data || {} });
+});
+
+r.put("/preferences", requireAuth, async (req, res) => {
+  await supabaseAdmin.from("notification_preferences").upsert({ user_id: req.user!.id, ...req.body });
+  res.json({ ok: true });
 });
 
 export default r;
