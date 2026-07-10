@@ -35,7 +35,7 @@ export function createApp() {
   const app = express();
   app.disable("x-powered-by");
   app.use(helmet());
-  app.use(cors({ origin: env.APP_URL, credentials: true }));
+  app.use(cors({ origin: [env.APP_URL, "http://localhost:8080", "http://localhost:3000"], credentials: true }));
   app.use(compression());
   app.use(morgan(env.NODE_ENV === "development" ? "dev" : "combined"));
 
