@@ -1,6 +1,7 @@
 import { supabaseAdmin } from "../config/supabase.js";
 import { runAgent } from "../agents/agentFactory.js";
 import { enqueueNotification } from "./notifications.js";
+import { getGithubToken } from "./githubToken.js";
 
 // ─── Live progress (in-memory, single API process) ────────────────────────────
 
@@ -19,12 +20,106 @@ export function getReviewProgress(reviewId: string): ReviewProgress | null {
   return progressMap.get(reviewId) ?? null;
 }
 
-// Evict old entries after 10 minutes
 function scheduleEvict(reviewId: string) {
   setTimeout(() => progressMap.delete(reviewId), 10 * 60 * 1000).unref?.();
 }
 
-// ─── Main job — reviews files one by one ──────────────────────────────────────
+// ─── Fetch ALL source files from GitHub (not just the 10 editor samples) ──────
+
+const CODE_EXT = /\.(tsx?|jsx?|mjs|cjs|py|go|rb|java|php|cs|vue|svelte|rs|kt|swift|c|cpp|h|sql|sh|ya?ml|env|toml)$/i;
+const SKIP_PATH = /(^|\/)(node_modules|dist|build|\.next|\.output|coverage|vendor)\/|\.min\.|\.gen\.|(^|\/)(package-lock\.json|yarn\.lock|pnpm-lock\.yaml)$/i;
+const MAX_FILES = 25;
+
+async function fetchProjectFiles(projectId: string, userId?: string | null): Promise<{ path: string; content: string }[]> {
+  const { data: project } = await supabaseAdmin.from("projects").select("repo_url").eq("id", projectId).maybeSingle();
+  if (!project?.repo_url) return [];
+
+  const token = await getGithubToken(userId ?? undefined);
+  if (!token) return [];
+
+  const fullName = (() => {
+    try {
+      const u = new URL(project.repo_url);
+      const parts = u.pathname.replace(/^\//, "").replace(/\.git$/, "").split("/");
+      return parts.length >= 2 ? `${parts[0]}/${parts[1]}` : null;
+    } catch { return null; }
+  })();
+  if (!fullName) return [];
+
+  const gh = (path: string) => fetch(`https://api.github.com${path}`, {
+    headers: { Authorization: `Bearer ${token}`, Accept: "application/vnd.github+json" },
+  });
+
+  const repoRes = await gh(`/repos/${fullName}`);
+  if (!repoRes.ok) return [];
+  const branch = ((await repoRes.json()) as any).default_branch ?? "main";
+
+  const treeRes = await gh(`/repos/${fullName}/git/trees/${branch}?recursive=1`);
+  if (!treeRes.ok) return [];
+  const tree: any[] = ((await treeRes.json()) as any).tree ?? [];
+
+  // Source code files first (src/, app/, lib/), then the rest
+  const candidates = tree
+    .filter((t) => t.type === "blob" && (t.size ?? 0) < 60_000 && CODE_EXT.test(t.path) && !SKIP_PATH.test(t.path))
+    .sort((a, b) => {
+      const aSrc = /^(src|app|lib|api|server|components|pages|routes)\//.test(a.path) ? 0 : 1;
+      const bSrc = /^(src|app|lib|api|server|components|pages|routes)\//.test(b.path) ? 0 : 1;
+      return aSrc - bSrc;
+    })
+    .slice(0, MAX_FILES);
+
+  const files: { path: string; content: string }[] = [];
+  await Promise.all(candidates.map(async (f) => {
+    try {
+      const cr = await gh(`/repos/${fullName}/contents/${f.path}?ref=${branch}`);
+      if (!cr.ok) return;
+      const cd: any = await cr.json();
+      if (cd.content) {
+        files.push({ path: f.path, content: Buffer.from(cd.content.replace(/\n/g, ""), "base64").toString("utf-8") });
+      }
+    } catch { /* skip unreadable files */ }
+  }));
+
+  // Keep source-first ordering after the parallel fetch
+  files.sort((a, b) => candidates.findIndex((c) => c.path === a.path) - candidates.findIndex((c) => c.path === b.path));
+  return files;
+}
+
+// ─── Instant local secret scan (tokens, JWTs, API keys) ───────────────────────
+
+const SECRET_PATTERNS: { re: RegExp; label: string }[] = [
+  { re: /AKIA[0-9A-Z]{16}/g,                                              label: "AWS access key" },
+  { re: /gh[pousr]_[A-Za-z0-9]{30,}/g,                                    label: "GitHub token" },
+  { re: /sk-[A-Za-z0-9_-]{20,}/g,                                         label: "API secret key (sk-...)" },
+  { re: /eyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]+/g,  label: "Hardcoded JWT" },
+  { re: /-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----/g,             label: "Private key" },
+  { re: /https?:\/\/[^\/\s:]+:[^@\s\/]+@/g,                               label: "Credentials in URL" },
+  { re: /(?:api[_-]?key|secret|password|token)["'\s]*[:=]["'\s]*["'][A-Za-z0-9_\-.]{20,}["']/gi, label: "Hardcoded credential" },
+];
+
+function scanSecrets(path: string, content: string): Finding[] {
+  const findings: Finding[] = [];
+  const lines = content.split("\n");
+  for (const { re, label } of SECRET_PATTERNS) {
+    for (let i = 0; i < lines.length; i++) {
+      re.lastIndex = 0;
+      if (re.test(lines[i])) {
+        findings.push({
+          file_path: path,
+          line: i + 1,
+          severity: "critical",
+          title: `🔑 Exposed secret: ${label}`,
+          suggestion: "Remove the secret from source, rotate it immediately, and load it from an environment variable instead.",
+        });
+      }
+    }
+  }
+  return findings;
+}
+
+// ─── Main job — reviews files in parallel ─────────────────────────────────────
+
+const CONCURRENCY = 4;
 
 export async function runReviewJob(input: { reviewId: string; diff?: string }) {
   const { data: review, error: reviewError } = await supabaseAdmin
@@ -40,25 +135,13 @@ export async function runReviewJob(input: { reviewId: string; diff?: string }) {
   const projectName = (review as any)?.projects?.name ?? "project";
   const reviewLabel = review.pr_number ? `PR #${review.pr_number}` : (review.ref ?? "HEAD");
 
-  // Split the diff into per-file sections: "=== path ===\ncontent"
-  const fileSections: { path: string; content: string }[] = [];
-  if (input.diff) {
-    const parts = input.diff.split(/^=== (.+?) ===$/m);
-    // parts = ["", path1, content1, path2, content2, ...]
-    for (let i = 1; i < parts.length - 1; i += 2) {
-      const path = parts[i].trim();
-      const content = (parts[i + 1] ?? "").trim();
-      if (path && content) fileSections.push({ path, content });
-    }
-  }
-
   const progress: ReviewProgress = {
     status: "running",
-    files_total: Math.max(fileSections.length, 1),
+    files_total: 1,
     files_done: 0,
     current_file: null,
     findings_count: 0,
-    files: fileSections.map((f) => ({ path: f.path, status: "pending", findings: 0 })),
+    files: [],
   };
   progressMap.set(input.reviewId, progress);
 
@@ -66,44 +149,76 @@ export async function runReviewJob(input: { reviewId: string; diff?: string }) {
   let totalTokens = 0;
 
   try {
-    if (fileSections.length > 0) {
-      // ── Review each file individually ──────────────────────────────────
-      for (const [idx, file] of fileSections.entries()) {
-        progress.current_file = file.path;
-        progress.files[idx].status = "reviewing";
+    // ── Collect files: full repo fetch first, client diff as fallback ─────
+    let fileSections = review.project_id
+      ? await fetchProjectFiles(review.project_id, review.requested_by)
+      : [];
 
-        const message = [
-          `Review the file "${file.path}" and identify ALL issues: bugs, security vulnerabilities, duplicated code, performance problems, and code smells.`,
-          `For EACH issue output a numbered line in exactly this format:`,
-          `N. <severity emoji 🔴|🟠|🟡|🟢> **<critical|high|medium|low>** — <short issue title>`,
-          `   Line: <line number>`,
-          `   Fix: <one-line recommendation>`,
-          `If the file is clean, reply "No issues found."`,
-          ``,
-          "```",
-          file.content.slice(0, 40_000),
-          "```",
-        ].join("\n");
-
-        let fullText = "";
-        const { tokensUsed } = await runAgent({
-          agentType: "code-review",
-          message,
-          history: [],
-          onChunk: (t) => { fullText += t; },
-        });
-        totalTokens += tokensUsed;
-
-        const fileFindings = parseFindings(fullText, file.path);
-        allFindings.push(...fileFindings);
-
-        progress.files[idx].status = "done";
-        progress.files[idx].findings = fileFindings.length;
-        progress.files_done = idx + 1;
-        progress.findings_count = allFindings.length;
+    if (fileSections.length === 0 && input.diff) {
+      const parts = input.diff.split(/^=== (.+?) ===$/m);
+      for (let i = 1; i < parts.length - 1; i += 2) {
+        const path = parts[i].trim();
+        const content = (parts[i + 1] ?? "").trim();
+        if (path && content) fileSections.push({ path, content });
       }
+    }
+
+    progress.files_total = Math.max(fileSections.length, 1);
+    progress.files = fileSections.map((f) => ({ path: f.path, status: "pending", findings: 0 }));
+
+    if (fileSections.length > 0) {
+      // ── Parallel review, CONCURRENCY files at a time ──────────────────
+      let nextIdx = 0;
+      const reviewOne = async () => {
+        while (true) {
+          const idx = nextIdx++;
+          if (idx >= fileSections.length) break;
+          const file = fileSections[idx];
+          progress.files[idx].status = "reviewing";
+          progress.current_file = file.path;
+
+          // 1) Instant local secret scan
+          const secretFindings = scanSecrets(file.path, file.content);
+
+          // 2) AI review
+          const message = [
+            `Review the file "${file.path}". Identify bugs, security vulnerabilities, exposed secrets/tokens/JWT/API keys, duplicated code, performance problems, and code smells. Also give best-practice advice (severity low) even for clean code.`,
+            `For EACH item output a numbered line in exactly this format:`,
+            `N. <severity emoji 🔴|🟠|🟡|🟢> **<critical|high|medium|low>** — <short issue title>`,
+            `   Line: <line number>`,
+            `   Fix: <one-line recommendation>`,
+            `If the file is completely clean, reply "No issues found."`,
+            ``,
+            "```",
+            file.content.slice(0, 30_000),
+            "```",
+          ].join("\n");
+
+          let fullText = "";
+          try {
+            const { tokensUsed } = await runAgent({
+              agentType: "code-review",
+              message,
+              history: [],
+              onChunk: (t) => { fullText += t; },
+            });
+            totalTokens += tokensUsed;
+          } catch (e) {
+            console.error(`AI review failed for ${file.path}:`, e);
+          }
+
+          const fileFindings = [...secretFindings, ...parseFindings(fullText, file.path)];
+          allFindings.push(...fileFindings);
+
+          progress.files[idx].status = "done";
+          progress.files[idx].findings = fileFindings.length;
+          progress.files_done++;
+          progress.findings_count = allFindings.length;
+        }
+      };
+      await Promise.all(Array.from({ length: Math.min(CONCURRENCY, fileSections.length) }, reviewOne));
     } else {
-      // ── No diff — one general review pass ──────────────────────────────
+      // ── No files at all — one general pass ─────────────────────────────
       progress.current_file = projectName;
       let fullText = "";
       const { tokensUsed } = await runAgent({
@@ -132,8 +247,8 @@ export async function runReviewJob(input: { reviewId: string; diff?: string }) {
       }
     }
 
-    // ── Score ─────────────────────────────────────────────────────────────
-    const deductions: Record<string, number> = { critical: 25, high: 15, medium: 8, low: 3, info: 1 };
+    // ── Score (low/info advice doesn't hurt the score much) ───────────────
+    const deductions: Record<string, number> = { critical: 25, high: 15, medium: 8, low: 2, info: 0 };
     const score = Math.max(0, Math.min(100,
       100 - allFindings.reduce((sum, f) => sum + (deductions[f.severity] ?? 0), 0)
     ));
@@ -149,6 +264,14 @@ export async function runReviewJob(input: { reviewId: string; diff?: string }) {
       score,
       completed_at: new Date().toISOString(),
     }).eq("id", input.reviewId);
+
+    // Save the score on the project so cards stop showing N/A
+    if (review.project_id) {
+      await supabaseAdmin.from("projects").update({
+        health_score: score,
+        updated_at: new Date().toISOString(),
+      }).eq("id", review.project_id);
+    }
 
     if (allFindings.length > 0) {
       await supabaseAdmin.from("review_findings").insert(
@@ -170,12 +293,18 @@ export async function runReviewJob(input: { reviewId: string; diff?: string }) {
     scheduleEvict(input.reviewId);
 
     if (review.requested_by) {
-      const highCount = allFindings.filter((f) => ["critical", "high"].includes(f.severity)).length;
+      const critCount   = allFindings.filter((f) => f.severity === "critical").length;
+      const highCount   = allFindings.filter((f) => f.severity === "high").length;
+      const secretCount = allFindings.filter((f) => f.title.includes("Exposed secret")).length;
+      const parts = [`Score ${score}/100 — ${allFindings.length} finding(s).`];
+      if (secretCount) parts.push(`⚠️ ${secretCount} exposed secret(s) — rotate them now!`);
+      else if (critCount + highCount > 0) parts.push(`${critCount + highCount} high-priority issue(s).`);
+      else parts.push("Clean code — nice work! 🎉");
       await enqueueNotification({
         userId: review.requested_by,
-        type: highCount > 0 ? "alert" : "success",
-        title: "Review completed",
-        body: `${projectName} ${reviewLabel} — ${allFindings.length} finding(s)${highCount ? `, ${highCount} high severity` : ""}.`,
+        type: (critCount + secretCount) > 0 ? "alert" : "success",
+        title: `Review completed: ${projectName}`,
+        body: `${reviewLabel} — ${parts.join(" ")}`,
         link: `/code-review/${review.project_id}`,
         preferenceKey: "push_review_complete",
       });
@@ -242,7 +371,6 @@ function parseFindings(text: string, defaultFile: string): Finding[] {
   for (const raw of lines) {
     const line = raw.trim();
 
-    // "1. 🔴 **critical** — issue title"
     const m = line.match(/^\d+\.\s*(🔴|🟠|🟡|🟢|🔵)?\s*\*?\*?(critical|high|medium|low|info)\*?\*?[:\s—–-]+(.+)/i);
     if (m) {
       flush();
