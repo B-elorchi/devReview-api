@@ -58,29 +58,29 @@ const AGENT_COMMANDS: Record<string, { agentType: AgentType; label: string; emoj
 
 const HELP_TEXT = `*DevReview AI Bot* 🤖
 
-Full AI platform assistant — manage projects, trigger reviews, push to GitHub, all from Telegram\\.
+Full AI platform assistant — manage projects, trigger reviews, push to GitHub, all from Telegram.
 
-*🧠 Platform \\(just type naturally\\):*
+*🧠 Platform (just type naturally):*
 • "list my projects"
-• "review valetclub\\-admin"
+• "review valetclub-admin"
 • "show results for myapp"
-• "create project elorchi\\-backend"
+• "create project elorchi-backend"
 • "push myapp to github with message: fix auth bug"
-• "write a new index\\.ts for myapp"
-• "read src/auth\\.ts in myapp"
+• "write a new index.ts for myapp"
+• "read src/auth.ts in myapp"
 • "show workspace stats"
 
 Or use shortcuts:
 /projects — List your projects
 /platform — Platform assistant mode
-/review \\`name\\` — Review a project
-/results \\`name\\` — Get last review results
-/files \\`name\\` — List project files
+/review name — Review a project
+/results name — Get last review results
+/files name — List project files
 
 *🔬 Code Analysis Agents:*
 /codereview — Senior code review
 /quality — Code quality & architecture
-/security — Security scan \\(OWASP Top 10\\)
+/security — Security scan (OWASP Top 10)
 /devops — DevOps & infrastructure
 
 /help — Show this message`;
