@@ -204,17 +204,26 @@ async function runAgentAndReply(chatId: string, state: ChatState, userText: stri
       );
       return;
     }
-    // Get default workspace for the user — fall back to first workspace membership
+    // Pick the user's workspace: default_workspace_id if set, otherwise the
+    // membership workspace that has the MOST projects (avoids empty workspaces)
     const { data: profile } = await supabaseAdmin.from("profiles").select("default_workspace_id").eq("id", userId).maybeSingle();
     let workspaceId: string | null = profile?.default_workspace_id ?? null;
     if (!workspaceId) {
-      const { data: member } = await supabaseAdmin
+      const { data: members } = await supabaseAdmin
         .from("workspace_members")
         .select("workspace_id")
-        .eq("user_id", userId)
-        .limit(1)
-        .maybeSingle();
-      workspaceId = member?.workspace_id ?? null;
+        .eq("user_id", userId);
+      const candidates = (members ?? []).map((m) => m.workspace_id);
+      if (candidates.length === 1) {
+        workspaceId = candidates[0];
+      } else if (candidates.length > 1) {
+        const counts = await Promise.all(candidates.map(async (wid) => {
+          const { count } = await supabaseAdmin.from("projects").select("id", { count: "exact", head: true }).eq("workspace_id", wid);
+          return { wid, count: count ?? 0 };
+        }));
+        counts.sort((a, b) => b.count - a.count);
+        workspaceId = counts[0].wid;
+      }
     }
     if (!workspaceId) {
       const { data: owned } = await supabaseAdmin

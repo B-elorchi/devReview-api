@@ -431,7 +431,44 @@ export const workspaceStatsTool = tool(
   }
 );
 
+// ─── GitHub repo creation ─────────────────────────────────────────────────────
+
+export const createGithubRepoTool = tool(
+  async ({ name, description, is_private }: { name: string; description?: string; is_private?: boolean }) => {
+    const { env } = await import("../config/env.js");
+    if (!env.GITHUB_TOKEN) return "GitHub token not configured on the server — cannot create repos.";
+    const slug = name.toLowerCase().replace(/[^a-z0-9._-]+/g, "-").replace(/(^-|-$)/g, "");
+    const resp = await fetch("https://api.github.com/user/repos", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${env.GITHUB_TOKEN}`,
+        Accept: "application/vnd.github+json",
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        name: slug,
+        description: description ?? "",
+        private: is_private ?? false,
+        auto_init: true,
+      }),
+    });
+    const data: any = await resp.json();
+    if (!resp.ok) return `Failed to create GitHub repo: ${data.message ?? resp.status}${data.errors ? " — " + JSON.stringify(data.errors) : ""}`;
+    return `✅ GitHub repo created: ${data.html_url}\nClone: ${data.clone_url}\nDefault branch: ${data.default_branch}`;
+  },
+  {
+    name: "create_github_repo",
+    description: "Create a real GitHub repository via the GitHub API. Use when the user asks to create a repo on GitHub. Returns the actual repo URL — NEVER invent a GitHub URL yourself.",
+    schema: z.object({
+      name:        z.string().describe("Repository name (will be slugified)"),
+      description: z.string().optional().describe("Repo description"),
+      is_private:  z.boolean().optional().describe("Create as private repo (default false)"),
+    }),
+  }
+);
+
 export const ALL_PLATFORM_TOOLS = [
+  createGithubRepoTool,
   listProjectsTool,
   getProjectTool,
   createProjectTool,
