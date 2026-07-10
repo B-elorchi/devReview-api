@@ -2,7 +2,7 @@ import { Router } from "express";
 import { z } from "zod";
 import { requireAuth, requireWorkspace } from "../middleware/auth.js";
 import { supabaseAdmin } from "../config/supabase.js";
-import { runReviewJob } from "../services/review.js";
+import { runReviewJob, getReviewProgress } from "../services/review.js";
 import { enqueueNotification } from "../services/notifications.js";
 
 const r = Router();
@@ -39,6 +39,15 @@ r.post("/projects/:id/reviews", requireAuth, requireWorkspace, async (req, res) 
   runReviewJob({ reviewId: review.id, diff: body.diff }).catch((err) => {
     console.error("Review job error", err);
   });
+});
+
+// Live progress — polled by the frontend while a review runs
+r.get("/reviews/:id/progress", requireAuth, requireWorkspace, async (req, res) => {
+  const progress = getReviewProgress(req.params.id);
+  if (progress) return res.json({ progress });
+  // No in-memory entry (server restarted or review finished long ago) — derive from DB
+  const { data } = await supabaseAdmin.from("reviews").select("status").eq("id", req.params.id).maybeSingle();
+  res.json({ progress: data ? { status: data.status, files_total: 0, files_done: 0, current_file: null, findings_count: 0, files: [] } : null });
 });
 
 r.get("/reviews/:id", requireAuth, requireWorkspace, async (req, res) => {

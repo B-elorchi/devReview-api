@@ -2,6 +2,30 @@ import { supabaseAdmin } from "../config/supabase.js";
 import { runAgent } from "../agents/agentFactory.js";
 import { enqueueNotification } from "./notifications.js";
 
+// ─── Live progress (in-memory, single API process) ────────────────────────────
+
+export type ReviewProgress = {
+  status: "running" | "completed" | "failed";
+  files_total: number;
+  files_done: number;
+  current_file: string | null;
+  findings_count: number;
+  files: { path: string; status: "pending" | "reviewing" | "done"; findings: number }[];
+};
+
+const progressMap = new Map<string, ReviewProgress>();
+
+export function getReviewProgress(reviewId: string): ReviewProgress | null {
+  return progressMap.get(reviewId) ?? null;
+}
+
+// Evict old entries after 10 minutes
+function scheduleEvict(reviewId: string) {
+  setTimeout(() => progressMap.delete(reviewId), 10 * 60 * 1000).unref?.();
+}
+
+// ─── Main job — reviews files one by one ──────────────────────────────────────
+
 export async function runReviewJob(input: { reviewId: string; diff?: string }) {
   const { data: review, error: reviewError } = await supabaseAdmin
     .from("reviews")
@@ -16,53 +40,119 @@ export async function runReviewJob(input: { reviewId: string; diff?: string }) {
   const projectName = (review as any)?.projects?.name ?? "project";
   const reviewLabel = review.pr_number ? `PR #${review.pr_number}` : (review.ref ?? "HEAD");
 
-  const message = input.diff
-    ? `Review this code and identify all bugs, security issues, performance problems, and code smells:\n\n${input.diff.slice(0, 60_000)}`
-    : `Perform a general code review for project "${projectName}". Identify potential issues, anti-patterns, and improvements.`;
+  // Split the diff into per-file sections: "=== path ===\ncontent"
+  const fileSections: { path: string; content: string }[] = [];
+  if (input.diff) {
+    const parts = input.diff.split(/^=== (.+?) ===$/m);
+    // parts = ["", path1, content1, path2, content2, ...]
+    for (let i = 1; i < parts.length - 1; i += 2) {
+      const path = parts[i].trim();
+      const content = (parts[i + 1] ?? "").trim();
+      if (path && content) fileSections.push({ path, content });
+    }
+  }
+
+  const progress: ReviewProgress = {
+    status: "running",
+    files_total: Math.max(fileSections.length, 1),
+    files_done: 0,
+    current_file: null,
+    findings_count: 0,
+    files: fileSections.map((f) => ({ path: f.path, status: "pending", findings: 0 })),
+  };
+  progressMap.set(input.reviewId, progress);
+
+  const allFindings: Finding[] = [];
+  let totalTokens = 0;
 
   try {
-    let fullText = "";
-    const { tokensUsed } = await runAgent({
-      agentType: "code-review",
-      message,
-      history: [],
-      onChunk: (text) => { fullText += text; },
-    });
+    if (fileSections.length > 0) {
+      // ── Review each file individually ──────────────────────────────────
+      for (const [idx, file] of fileSections.entries()) {
+        progress.current_file = file.path;
+        progress.files[idx].status = "reviewing";
 
-    if (tokensUsed > 0 && review.project_id) {
-      // Find workspace for this project
+        const message = [
+          `Review the file "${file.path}" and identify ALL issues: bugs, security vulnerabilities, duplicated code, performance problems, and code smells.`,
+          `For EACH issue output a numbered line in exactly this format:`,
+          `N. <severity emoji 🔴|🟠|🟡|🟢> **<critical|high|medium|low>** — <short issue title>`,
+          `   Line: <line number>`,
+          `   Fix: <one-line recommendation>`,
+          `If the file is clean, reply "No issues found."`,
+          ``,
+          "```",
+          file.content.slice(0, 40_000),
+          "```",
+        ].join("\n");
+
+        let fullText = "";
+        const { tokensUsed } = await runAgent({
+          agentType: "code-review",
+          message,
+          history: [],
+          onChunk: (t) => { fullText += t; },
+        });
+        totalTokens += tokensUsed;
+
+        const fileFindings = parseFindings(fullText, file.path);
+        allFindings.push(...fileFindings);
+
+        progress.files[idx].status = "done";
+        progress.files[idx].findings = fileFindings.length;
+        progress.files_done = idx + 1;
+        progress.findings_count = allFindings.length;
+      }
+    } else {
+      // ── No diff — one general review pass ──────────────────────────────
+      progress.current_file = projectName;
+      let fullText = "";
+      const { tokensUsed } = await runAgent({
+        agentType: "code-review",
+        message: `Perform a general code review for project "${projectName}". Identify potential issues, anti-patterns, and improvements.`,
+        history: [],
+        onChunk: (t) => { fullText += t; },
+      });
+      totalTokens += tokensUsed;
+      allFindings.push(...parseFindings(fullText, "general"));
+      progress.files_done = 1;
+      progress.findings_count = allFindings.length;
+    }
+
+    // ── Token accounting ──────────────────────────────────────────────────
+    if (totalTokens > 0 && review.project_id) {
       const { data: proj } = await supabaseAdmin.from("projects").select("workspace_id").eq("id", review.project_id).maybeSingle();
       if (proj?.workspace_id) {
-        const { error: rpcError } = await supabaseAdmin.rpc('increment_tokens', { workspace_id: proj.workspace_id, amount: tokensUsed });
+        const { error: rpcError } = await supabaseAdmin.rpc("increment_tokens", { workspace_id: proj.workspace_id, amount: totalTokens });
         if (rpcError) {
-          // Fallback if RPC doesn't exist
           const { data } = await supabaseAdmin.from("workspaces").select("tokens_used").eq("id", proj.workspace_id).single();
           if (data) {
-            await supabaseAdmin.from("workspaces").update({ tokens_used: (data.tokens_used || 0) + tokensUsed }).eq("id", proj.workspace_id);
+            await supabaseAdmin.from("workspaces").update({ tokens_used: (data.tokens_used || 0) + totalTokens }).eq("id", proj.workspace_id);
           }
         }
       }
     }
 
-    // Parse findings from the structured markdown response
-    const findings = parseFindings(fullText, input.diff);
-
-    // Score: starts at 100, deduct per finding severity
+    // ── Score ─────────────────────────────────────────────────────────────
     const deductions: Record<string, number> = { critical: 25, high: 15, medium: 8, low: 3, info: 1 };
     const score = Math.max(0, Math.min(100,
-      100 - findings.reduce((sum, f) => sum + (deductions[f.severity] ?? 0), 0)
+      100 - allFindings.reduce((sum, f) => sum + (deductions[f.severity] ?? 0), 0)
     ));
+
+    const summary = [
+      `Reviewed ${progress.files_total} file(s) — ${allFindings.length} finding(s).`,
+      ...progress.files.map((f) => `• ${f.path}: ${f.findings} finding(s)`),
+    ].join("\n");
 
     await supabaseAdmin.from("reviews").update({
       status: "completed",
-      summary: fullText.slice(0, 5000),
+      summary: summary.slice(0, 5000),
       score,
       completed_at: new Date().toISOString(),
     }).eq("id", input.reviewId);
 
-    if (findings.length > 0) {
+    if (allFindings.length > 0) {
       await supabaseAdmin.from("review_findings").insert(
-        findings.map((f) => ({
+        allFindings.map((f) => ({
           review_id: input.reviewId,
           file_path: f.file_path,
           line: f.line ?? null,
@@ -75,19 +165,25 @@ export async function runReviewJob(input: { reviewId: string; diff?: string }) {
       );
     }
 
+    progress.status = "completed";
+    progress.current_file = null;
+    scheduleEvict(input.reviewId);
+
     if (review.requested_by) {
-      const highCount = findings.filter((f) => ["critical", "high"].includes(f.severity)).length;
+      const highCount = allFindings.filter((f) => ["critical", "high"].includes(f.severity)).length;
       await enqueueNotification({
         userId: review.requested_by,
         type: highCount > 0 ? "alert" : "success",
         title: "Review completed",
-        body: `${projectName} ${reviewLabel} — ${findings.length} finding(s)${highCount ? `, ${highCount} high severity` : ""}.`,
+        body: `${projectName} ${reviewLabel} — ${allFindings.length} finding(s)${highCount ? `, ${highCount} high severity` : ""}.`,
         link: `/code-review/${review.project_id}`,
         preferenceKey: "push_review_complete",
       });
     }
   } catch (error) {
     console.error("Review job failed:", error);
+    progress.status = "failed";
+    scheduleEvict(input.reviewId);
     await supabaseAdmin.from("reviews").update({
       status: "failed",
       summary: `Review failed: ${String(error)}`,
@@ -117,91 +213,69 @@ type Finding = {
   suggestion: string;
 };
 
-function parseFindings(text: string, diff?: string): Finding[] {
+const sevMap: Record<string, Finding["severity"]> = {
+  "🔴": "critical", critical: "critical",
+  "🟠": "high",     high: "high",
+  "🟡": "medium",   medium: "medium",
+  "🟢": "low",      low: "low",
+  "🔵": "info",     info: "info",
+};
+
+function parseFindings(text: string, defaultFile: string): Finding[] {
   const findings: Finding[] = [];
   const lines = text.split("\n");
+  let current: Partial<Finding> | null = null;
 
-  // Extract file paths mentioned in the diff for context
-  const diffFiles = diff
-    ? [...diff.matchAll(/^=== (.+?) ===/gm)].map((m) => m[1])
-    : [];
-
-  const sevMap: Record<string, Finding["severity"]> = {
-    "🔴": "critical", critical: "critical",
-    "🟠": "high",     high: "high",
-    "🟡": "medium",   medium: "medium",
-    "🟢": "low",      low: "low",
-    "🔵": "info",     info: "info",
+  const flush = () => {
+    if (current?.title) {
+      findings.push({
+        file_path: current.file_path || defaultFile,
+        line: current.line,
+        severity: current.severity ?? "medium",
+        title: current.title,
+        suggestion: current.suggestion || current.title || "",
+      });
+    }
+    current = null;
   };
 
-  let currentFinding: Partial<Finding> | null = null;
+  for (const raw of lines) {
+    const line = raw.trim();
 
-  for (let i = 0; i < lines.length; i++) {
-    const line = lines[i].trim();
-
-    // Match numbered finding lines like: "1. 🔴 **Critical** — some issue"
-    const findingMatch = line.match(/^\d+\.\s*(🔴|🟠|🟡|🟢|🔵)?\s*\*?\*?(critical|high|medium|low|info)\*?\*?[:\s—-]+(.+)/i);
-    if (findingMatch) {
-      if (currentFinding?.title) findings.push(completeFinding(currentFinding, diffFiles));
-      const sevKey = findingMatch[1] ?? findingMatch[2].toLowerCase();
-      currentFinding = {
+    // "1. 🔴 **critical** — issue title"
+    const m = line.match(/^\d+\.\s*(🔴|🟠|🟡|🟢|🔵)?\s*\*?\*?(critical|high|medium|low|info)\*?\*?[:\s—–-]+(.+)/i);
+    if (m) {
+      flush();
+      const sevKey = m[1] ?? m[2].toLowerCase();
+      current = {
         severity: sevMap[sevKey] ?? "medium",
-        title: findingMatch[3].replace(/\*\*/g, "").trim(),
+        title: m[3].replace(/\*\*/g, "").trim(),
         file_path: "",
         suggestion: "",
       };
       continue;
     }
 
-    // Match file path mentions like "File: src/foo.ts:12"
-    if (currentFinding) {
-      const fileMatch = line.match(/(?:file|path|location)[:\s]+([^\s:]+\.[a-z]+)(?::(\d+))?/i);
-      if (fileMatch) {
-        currentFinding.file_path = fileMatch[1];
-        if (fileMatch[2]) currentFinding.line = parseInt(fileMatch[2]);
-        continue;
-      }
+    if (!current) continue;
 
-      // Suggestion / fix / recommendation lines
-      if (/^(?:fix|suggestion|recommendation|solution)[:\s]/i.test(line)) {
-        currentFinding.suggestion = line.replace(/^(?:fix|suggestion|recommendation|solution)[:\s]/i, "").trim();
-        continue;
-      }
+    const lineMatch = line.match(/^line[:\s]+(\d+)/i);
+    if (lineMatch) { current.line = parseInt(lineMatch[1]); continue; }
 
-      // Inline code reference like "`src/foo.ts`"
-      if (!currentFinding.file_path) {
-        const inlineFile = line.match(/`([^`]+\.[a-z]+)`/);
-        if (inlineFile) currentFinding.file_path = inlineFile[1];
-      }
+    const fileMatch = line.match(/(?:file|path|location)[:\s]+([^\s:]+\.[a-z]+)(?::(\d+))?/i);
+    if (fileMatch) {
+      current.file_path = fileMatch[1];
+      if (fileMatch[2]) current.line = parseInt(fileMatch[2]);
+      continue;
+    }
 
-      // Append to suggestion if it looks like explanation text
-      if (line && !line.startsWith("#") && !line.startsWith("*") && currentFinding.suggestion === "") {
-        currentFinding.suggestion = line;
-      }
+    const fixMatch = line.match(/^(?:fix|suggestion|recommendation|solution)[:\s]+(.+)/i);
+    if (fixMatch) { current.suggestion = fixMatch[1].trim(); continue; }
+
+    if (line && !line.startsWith("#") && !current.suggestion) {
+      current.suggestion = line;
     }
   }
-
-  if (currentFinding?.title) findings.push(completeFinding(currentFinding, diffFiles));
-
-  // If nothing parsed, create one generic finding from the summary
-  if (findings.length === 0 && text.length > 100) {
-    findings.push({
-      file_path: diffFiles[0] ?? "unknown",
-      severity: "medium",
-      title: "Review completed — see summary for details",
-      suggestion: text.slice(0, 500),
-    });
-  }
+  flush();
 
   return findings;
-}
-
-function completeFinding(f: Partial<Finding>, diffFiles: string[]): Finding {
-  return {
-    file_path: f.file_path || diffFiles[0] || "unknown",
-    line: f.line,
-    severity: f.severity ?? "medium",
-    title: f.title ?? "Issue found",
-    suggestion: f.suggestion || f.title || "",
-  };
 }

@@ -33,6 +33,7 @@ import ai from "./routes/ai.js";
 
 export function createApp() {
   const app = express();
+  app.set("trust proxy", 1); // behind Traefik/Dokploy — needed for express-rate-limit
   app.disable("x-powered-by");
   app.use(helmet());
   app.use(cors({ origin: [env.APP_URL, "http://localhost:8080", "http://localhost:3000"], credentials: true }));
