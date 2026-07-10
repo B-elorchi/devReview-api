@@ -24,7 +24,7 @@ async function enrichWorkspaceStats(ws: any) {
     ...ws, 
     projects_count: pRes.count || 0, 
     users_count: uRes.count || 0, 
-    tokens_used: 67987 // Hardcoded for screenshot purposes as requested
+    tokens_used: ws.tokens_used || 0
   };
 }
 

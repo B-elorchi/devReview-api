@@ -22,12 +22,27 @@ export async function runReviewJob(input: { reviewId: string; diff?: string }) {
 
   try {
     let fullText = "";
-    await runAgent({
+    const { tokensUsed } = await runAgent({
       agentType: "code-review",
       message,
       history: [],
       onChunk: (text) => { fullText += text; },
     });
+
+    if (tokensUsed > 0 && review.project_id) {
+      // Find workspace for this project
+      const { data: proj } = await supabaseAdmin.from("projects").select("workspace_id").eq("id", review.project_id).maybeSingle();
+      if (proj?.workspace_id) {
+        await supabaseAdmin.rpc('increment_tokens', { workspace_id: proj.workspace_id, amount: tokensUsed }).catch(() => {
+          // Fallback if RPC doesn't exist
+          supabaseAdmin.from("workspaces").select("tokens_used").eq("id", proj.workspace_id).single().then(({data}) => {
+            if (data) {
+              supabaseAdmin.from("workspaces").update({ tokens_used: (data.tokens_used || 0) + tokensUsed }).eq("id", proj.workspace_id).then();
+            }
+          });
+        });
+      }
+    }
 
     // Parse findings from the structured markdown response
     const findings = parseFindings(fullText, input.diff);

@@ -182,13 +182,14 @@ async function runAgentAndReply(chatId: string, state: ChatState, userText: stri
 
   let response = "";
   try {
-    response = await runAgent({
+    const { fullText } = await runAgent({
       agentType:   state.agentType,
       message:     userText,
       history:     state.history,
       userId:      userId,
-      onChunk:     () => {}, // streaming not needed for Telegram — use return value
+      onChunk:     () => {},
     });
+    response = fullText;
 
     // Update history
     state.history.push({ role: "user", content: userText });

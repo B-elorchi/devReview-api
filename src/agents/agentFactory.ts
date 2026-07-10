@@ -113,13 +113,13 @@ export async function runAgent({
   history: { role: "user" | "assistant"; content: string }[];
   userId?: string;
   onChunk: (text: string) => void;
-}): Promise<string> {
+}): Promise<{ fullText: string; tokensUsed: number }> {
   let tools = AGENT_TOOLS[agentType];
   
   if (agentType === "platform-assistant" && userId) {
     tools = getPlatformTools(userId);
   } else if (agentType === "platform-assistant") {
-    return "Error: User ID is required to use the Platform Assistant. Please link your Telegram account.";
+    return { fullText: "Error: User ID is required to use the Platform Assistant. Please link your Telegram account.", tokensUsed: 0 };
   }
 
   const systemPrompt = SYSTEM_PROMPTS[agentType];
@@ -145,10 +145,16 @@ export async function runAgent({
 
   // streamMode:"messages" emits 2-tuples: [BaseMessage|AIMessageChunk, metadata]
   let full = "";
+  let tokensUsed = 0;
 
   const stream = await agent.stream({ messages }, { streamMode: "messages" });
 
   for await (const [chunk, _meta] of stream) {
+    // Extract token metadata if present
+    if (chunk.usage_metadata?.total_tokens) {
+      tokensUsed = Math.max(tokensUsed, chunk.usage_metadata.total_tokens);
+    }
+
     // Accept AIMessageChunk (streaming tokens) and AIMessage (final node output)
     const isAI = chunk instanceof AIMessage || chunk instanceof AIMessageChunk;
     if (!isAI) continue;
@@ -163,5 +169,5 @@ export async function runAgent({
     }
   }
 
-  return full;
+  return { fullText: full, tokensUsed };
 }

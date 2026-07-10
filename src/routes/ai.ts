@@ -25,7 +25,7 @@ r.post("/inline-chat", aiLimiter, async (req, res) => {
   openSse(res);
 
   try {
-    await runAgent({
+    const { fullText } = await runAgent({
       agentType:   body.agentType,
       message:     body.message,
       fileName:    body.fileName,
