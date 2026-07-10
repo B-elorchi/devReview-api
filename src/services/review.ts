@@ -12,6 +12,8 @@ export type ReviewProgress = {
   current_file: string | null;
   findings_count: number;
   files: { path: string; status: "pending" | "reviewing" | "done"; findings: number }[];
+  // Live feed for the UI right sidebar — most recent findings first
+  recent_findings: { file_path: string; line?: number; severity: string; title: string; suggestion: string }[];
 };
 
 const progressMap = new Map<string, ReviewProgress>();
@@ -142,6 +144,7 @@ export async function runReviewJob(input: { reviewId: string; diff?: string }) {
     current_file: null,
     findings_count: 0,
     files: [],
+    recent_findings: [],
   };
   progressMap.set(input.reviewId, progress);
 
@@ -214,6 +217,10 @@ export async function runReviewJob(input: { reviewId: string; diff?: string }) {
           progress.files[idx].findings = fileFindings.length;
           progress.files_done++;
           progress.findings_count = allFindings.length;
+          progress.recent_findings = [
+            ...fileFindings.map((f) => ({ file_path: f.file_path, line: f.line, severity: f.severity, title: f.title, suggestion: f.suggestion })),
+            ...progress.recent_findings,
+          ].slice(0, 30);
         }
       };
       await Promise.all(Array.from({ length: Math.min(CONCURRENCY, fileSections.length) }, reviewOne));

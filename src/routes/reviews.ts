@@ -47,7 +47,7 @@ r.get("/reviews/:id/progress", requireAuth, requireWorkspace, async (req, res) =
   if (progress) return res.json({ progress });
   // No in-memory entry (server restarted or review finished long ago) — derive from DB
   const { data } = await supabaseAdmin.from("reviews").select("status").eq("id", req.params.id).maybeSingle();
-  res.json({ progress: data ? { status: data.status, files_total: 0, files_done: 0, current_file: null, findings_count: 0, files: [] } : null });
+  res.json({ progress: data ? { status: data.status, files_total: 0, files_done: 0, current_file: null, findings_count: 0, files: [], recent_findings: [] } : null });
 });
 
 r.get("/reviews/:id", requireAuth, requireWorkspace, async (req, res) => {
