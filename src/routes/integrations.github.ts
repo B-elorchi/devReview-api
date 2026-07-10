@@ -5,6 +5,7 @@ import { supabaseAdmin } from "../config/supabase.js";
 import { hmacSha256Hex, safeEqual } from "../utils/crypto.js";
 import { requireAuth } from "../middleware/auth.js";
 import { githubSyncQueue } from "../workers/queues.js";
+import { getGithubToken } from "../services/githubToken.js";
 
 const r = Router();
 
@@ -43,11 +44,12 @@ r.get("/install-url", requireAuth, (_req, res) => {
 });
 
 r.get("/repos", requireAuth, async (req, res) => {
-  if (!env.GITHUB_TOKEN) {
-    return res.json({ repos: [], note: "GITHUB_TOKEN not configured" });
+  const token = await getGithubToken(req.user!.id);
+  if (!token) {
+    return res.json({ repos: [], note: "No GitHub token — sign in with GitHub or set GITHUB_TOKEN" });
   }
-  const ghRes = await fetch("https://api.github.com/user/repos?per_page=50&sort=pushed&affiliation=owner,collaborator", {
-    headers: { Authorization: `Bearer ${env.GITHUB_TOKEN}`, Accept: "application/vnd.github+json" },
+  const ghRes = await fetch("https://api.github.com/user/repos?per_page=100&sort=pushed&affiliation=owner,collaborator", {
+    headers: { Authorization: `Bearer ${token}`, Accept: "application/vnd.github+json" },
   });
   if (!ghRes.ok) return res.status(502).json({ error: "GitHub API error" });
   const list: any[] = await ghRes.json();
@@ -66,8 +68,9 @@ r.get("/repos", requireAuth, async (req, res) => {
 });
 
 r.post("/repos", requireAuth, async (req, res) => {
-  if (!env.GITHUB_TOKEN) {
-    return res.status(501).json({ error: "GITHUB_TOKEN not configured on server" });
+  const token = await getGithubToken(req.user!.id);
+  if (!token) {
+    return res.status(501).json({ error: "No GitHub token — sign in with GitHub or set GITHUB_TOKEN" });
   }
   const body = z.object({
     name: z.string().min(1).max(100),
@@ -78,7 +81,7 @@ r.post("/repos", requireAuth, async (req, res) => {
   const ghRes = await fetch("https://api.github.com/user/repos", {
     method: "POST",
     headers: {
-      Authorization: `Bearer ${env.GITHUB_TOKEN}`,
+      Authorization: `Bearer ${token}`,
       Accept: "application/vnd.github+json",
       "Content-Type": "application/json",
     },

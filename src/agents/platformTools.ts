@@ -357,9 +357,10 @@ export const pushToGitHubTool = tool(
       .eq("sandbox_id", sandbox.id);
     if (!files?.length) return "No files to push.";
 
-    // Call the push endpoint logic directly
-    const { env } = await import("../config/env.js");
-    if (!env.GITHUB_TOKEN) return "GitHub token not configured on the server.";
+    // Prefer the user's own GitHub OAuth token, fall back to server token
+    const { getGithubToken } = await import("../services/githubToken.js");
+    const ghToken = await getGithubToken(_userId);
+    if (!ghToken) return "No GitHub token — sign in with GitHub on the platform first.";
 
     const fullName = (() => {
       try {
@@ -377,13 +378,13 @@ export const pushToGitHubTool = tool(
       try {
         let sha: string | undefined;
         const existing = await fetch(`https://api.github.com/repos/${fullName}/contents/${file.path}`, {
-          headers: { Authorization: `Bearer ${env.GITHUB_TOKEN}`, Accept: "application/vnd.github+json" },
+          headers: { Authorization: `Bearer ${ghToken}`, Accept: "application/vnd.github+json" },
         });
         if (existing.ok) { const ed: any = await existing.json(); sha = ed.sha; }
 
         const res = await fetch(`https://api.github.com/repos/${fullName}/contents/${file.path}`, {
           method: "PUT",
-          headers: { Authorization: `Bearer ${env.GITHUB_TOKEN}`, Accept: "application/vnd.github+json", "Content-Type": "application/json" },
+          headers: { Authorization: `Bearer ${ghToken}`, Accept: "application/vnd.github+json", "Content-Type": "application/json" },
           body: JSON.stringify({ message, content: Buffer.from(file.content).toString("base64"), sha }),
         });
         if (res.ok) pushed.push(file.path);
@@ -435,13 +436,14 @@ export const workspaceStatsTool = tool(
 
 export const createGithubRepoTool = tool(
   async ({ name, description, is_private }: { name: string; description?: string; is_private?: boolean }) => {
-    const { env } = await import("../config/env.js");
-    if (!env.GITHUB_TOKEN) return "GitHub token not configured on the server — cannot create repos.";
+    const { getGithubToken } = await import("../services/githubToken.js");
+    const ghToken = await getGithubToken(_userId);
+    if (!ghToken) return "No GitHub token — sign in with GitHub on the platform first.";
     const slug = name.toLowerCase().replace(/[^a-z0-9._-]+/g, "-").replace(/(^-|-$)/g, "");
     const resp = await fetch("https://api.github.com/user/repos", {
       method: "POST",
       headers: {
-        Authorization: `Bearer ${env.GITHUB_TOKEN}`,
+        Authorization: `Bearer ${ghToken}`,
         Accept: "application/vnd.github+json",
         "Content-Type": "application/json",
       },

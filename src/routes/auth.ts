@@ -1,6 +1,6 @@
 import { Router } from "express";
 import { requireAuth } from "../middleware/auth.js";
-import { supabaseAdmin } from "../config/supabase.js";
+import { supabaseAdmin, supabaseOAuth } from "../config/supabase.js";
 import { sendVerificationEmail, sendPasswordResetEmail } from "../services/email.js";
 
 const r = Router();
@@ -79,11 +79,12 @@ r.post("/reset-password", async (req, res) => {
 });
 
 r.get("/github", async (req, res) => {
-  const { data, error } = await supabaseAdmin.auth.signInWithOAuth({
+  const { data, error } = await supabaseOAuth.auth.signInWithOAuth({
     provider: "github",
     options: {
       redirectTo: `${process.env.API_URL || 'http://localhost:4000'}/api/v1/auth/callback`,
       skipBrowserRedirect: true,
+      scopes: "repo read:user user:email",
     }
   });
   if (error) return res.status(400).json({ error: error.message });
@@ -95,16 +96,43 @@ r.get("/callback", async (req, res) => {
   const errorParam = req.query.error as string;
   const errorDesc = req.query.error_description as string;
   const appUrl = process.env.APP_URL || 'http://localhost:8080';
-  
+
   if (errorParam) {
     return res.redirect(`${appUrl}/auth?error=${encodeURIComponent(errorParam)}&error_description=${encodeURIComponent(errorDesc || '')}`);
   }
-  
+
   if (!code) return res.redirect(`${appUrl}/auth?error=No+code+provided`);
-  
-  const { data, error } = await supabaseAdmin.auth.exchangeCodeForSession(code);
+
+  const { data, error } = await supabaseOAuth.auth.exchangeCodeForSession(code);
   if (error) return res.redirect(`${appUrl}/auth?error=${encodeURIComponent(error.message)}`);
-  
+
+  const userId = data.session.user.id;
+  const meta   = data.session.user.user_metadata ?? {};
+
+  // Store the user's GitHub OAuth token so we can list/push THEIR repos
+  if (data.session.provider_token) {
+    await supabaseAdmin.from("profiles").upsert({
+      id: userId,
+      github_token: data.session.provider_token,
+      github_refresh_token: data.session.provider_refresh_token ?? null,
+      github_username: meta.user_name ?? meta.preferred_username ?? null,
+    }, { onConflict: "id" });
+  }
+
+  // First OAuth sign-in: make sure the user has a workspace
+  const { data: membership } = await supabaseAdmin
+    .from("workspace_members").select("workspace_id").eq("user_id", userId).limit(1).maybeSingle();
+  if (!membership) {
+    const fullName: string = meta.full_name ?? meta.name ?? meta.user_name ?? "";
+    const wsName = fullName ? `${fullName.split(" ")[0]}'s Workspace` : "My Workspace";
+    const { data: ws } = await supabaseAdmin.from("workspaces")
+      .insert({ name: wsName, slug: `ws-${Date.now()}`, owner_id: userId })
+      .select().single();
+    if (ws) {
+      await supabaseAdmin.from("workspace_members").insert({ workspace_id: ws.id, user_id: userId, role: "owner" });
+    }
+  }
+
   // Redirect back to frontend with the access_token and refresh_token in the query string
   res.redirect(`${appUrl}/auth?token=${data.session.access_token}&refresh_token=${data.session.refresh_token}`);
 });
