@@ -281,18 +281,31 @@ export async function runReviewJob(input: { reviewId: string; diff?: string }) {
     }
 
     if (allFindings.length > 0) {
-      await supabaseAdmin.from("review_findings").insert(
-        allFindings.map((f) => ({
-          review_id: input.reviewId,
-          file_path: f.file_path,
-          line: f.line ?? null,
-          line_start: f.line ?? null,
-          severity: f.severity,
-          title: f.title,
-          message: f.title,
-          suggestion: f.suggestion,
-        }))
-      );
+      const rows = allFindings.map((f) => ({
+        review_id: input.reviewId,
+        file_path: (f.file_path ?? "unknown").slice(0, 500),
+        line: f.line ?? null,
+        line_start: f.line ?? null,
+        severity: f.severity,
+        title: f.title.slice(0, 500),
+        message: f.title.slice(0, 2000),
+        suggestion: (f.suggestion ?? "").slice(0, 2000),
+      }));
+
+      // Insert in chunks; on failure retry with a minimal column set so
+      // findings are never silently lost when the live schema is older
+      for (let i = 0; i < rows.length; i += 50) {
+        const chunk = rows.slice(i, i + 50);
+        const { error: insErr } = await supabaseAdmin.from("review_findings").insert(chunk);
+        if (insErr) {
+          console.error("review_findings insert failed:", insErr.message, "— retrying with minimal columns");
+          const { error: retryErr } = await supabaseAdmin.from("review_findings").insert(
+            chunk.map(({ review_id, file_path, severity, title, message, suggestion }) =>
+              ({ review_id, file_path, severity, title, message, suggestion }))
+          );
+          if (retryErr) console.error("review_findings minimal insert also failed:", retryErr.message);
+        }
+      }
     }
 
     progress.status = "completed";
