@@ -151,8 +151,9 @@ export async function runAgent({
 
   for await (const [chunk, _meta] of stream) {
     // Extract token metadata if present
-    if (chunk.usage_metadata?.total_tokens) {
-      tokensUsed = Math.max(tokensUsed, chunk.usage_metadata.total_tokens);
+    const chunkAny = chunk as any;
+    if (chunkAny.usage_metadata?.total_tokens) {
+      tokensUsed = Math.max(tokensUsed, chunkAny.usage_metadata.total_tokens);
     }
 
     // Accept AIMessageChunk (streaming tokens) and AIMessage (final node output)

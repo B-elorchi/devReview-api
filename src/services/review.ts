@@ -33,14 +33,14 @@ export async function runReviewJob(input: { reviewId: string; diff?: string }) {
       // Find workspace for this project
       const { data: proj } = await supabaseAdmin.from("projects").select("workspace_id").eq("id", review.project_id).maybeSingle();
       if (proj?.workspace_id) {
-        await supabaseAdmin.rpc('increment_tokens', { workspace_id: proj.workspace_id, amount: tokensUsed }).catch(() => {
+        const { error: rpcError } = await supabaseAdmin.rpc('increment_tokens', { workspace_id: proj.workspace_id, amount: tokensUsed });
+        if (rpcError) {
           // Fallback if RPC doesn't exist
-          supabaseAdmin.from("workspaces").select("tokens_used").eq("id", proj.workspace_id).single().then(({data}) => {
-            if (data) {
-              supabaseAdmin.from("workspaces").update({ tokens_used: (data.tokens_used || 0) + tokensUsed }).eq("id", proj.workspace_id).then();
-            }
-          });
-        });
+          const { data } = await supabaseAdmin.from("workspaces").select("tokens_used").eq("id", proj.workspace_id).single();
+          if (data) {
+            await supabaseAdmin.from("workspaces").update({ tokens_used: (data.tokens_used || 0) + tokensUsed }).eq("id", proj.workspace_id);
+          }
+        }
       }
     }
 
