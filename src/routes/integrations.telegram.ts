@@ -204,9 +204,27 @@ async function runAgentAndReply(chatId: string, state: ChatState, userText: stri
       );
       return;
     }
-    // Get default workspace for the user
+    // Get default workspace for the user — fall back to first workspace membership
     const { data: profile } = await supabaseAdmin.from("profiles").select("default_workspace_id").eq("id", userId).maybeSingle();
-    const workspaceId = profile?.default_workspace_id;
+    let workspaceId: string | null = profile?.default_workspace_id ?? null;
+    if (!workspaceId) {
+      const { data: member } = await supabaseAdmin
+        .from("workspace_members")
+        .select("workspace_id")
+        .eq("user_id", userId)
+        .limit(1)
+        .maybeSingle();
+      workspaceId = member?.workspace_id ?? null;
+    }
+    if (!workspaceId) {
+      const { data: owned } = await supabaseAdmin
+        .from("workspaces")
+        .select("id")
+        .eq("owner_id", userId)
+        .limit(1)
+        .maybeSingle();
+      workspaceId = owned?.id ?? null;
+    }
     if (!workspaceId) {
       await tgSend(chatId, "⚠️ No workspace found. Please create a workspace on the platform first.");
       return;
