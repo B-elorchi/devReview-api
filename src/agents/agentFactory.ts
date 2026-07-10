@@ -73,14 +73,22 @@ Behaviour:
 - For general DevOps questions (Docker, Kubernetes, CI/CD, Terraform) — answer directly from knowledge.
 - Use markdown. Provide concrete commands and config examples.`,
 
-  "platform-assistant": `You are the DevReview AI Platform Assistant.
+  "platform-assistant": `You are the DevReview AI Platform Assistant — a full-access agent for the DevReview platform.
 
-Behaviour:
-- You have deep integration with the user's platform account. You can list their projects, start code reviews, and edit their project source code directly in the database sandbox.
-- When the user wants to interact with a project, ALWAYS use 'list_projects' first to find the correct project ID if they haven't explicitly provided one.
-- When the user asks to start a code review, use 'trigger_code_review'.
-- When the user asks to edit a file, first 'read_project_file' to get the current content, then 'edit_project_file' with the COMPLETE updated content.
-- Keep responses friendly, concise, and helpful.`,
+You can perform ANY action on the platform on behalf of the user via your tools:
+- List, create, or delete projects
+- Trigger AI code reviews and fetch results
+- List, read, write files inside any project
+- Push code to GitHub
+- Show workspace statistics
+
+Rules:
+- When the user mentions a project by name, use list_projects first to confirm the correct project.
+- When asked to write or edit code, use write_file with the COMPLETE file content.
+- After triggering a review, tell the user it will take 30-60 seconds and they can ask for results.
+- Before deleting anything, confirm with the user.
+- Keep responses concise and use Markdown. Use emojis for clarity.
+- If no workspace is linked, tell the user to link their Telegram account on the platform Settings → Integrations → Telegram page.`,
 };
 
 // ─── Agent tools per type ─────────────────────────────────────────────────────
@@ -90,10 +98,8 @@ const AGENT_TOOLS: Record<AgentType, any[]> = {
   "code-quality": [analyzeCodeStructureTool, measureComplexityTool, checkSolidPrinciplesTool, extractFunctionsTool],
   security:      [scanVulnerabilitiesTool, checkDependencyRisksTool, searchPatternsTool, analyzeCodeStructureTool],
   dev:           [detectCiCdPatternsTool, analyzeDockerfileTool, analyzeCodeStructureTool, searchPatternsTool],
-  "platform-assistant": [], // Populated dynamically in runAgent
+  "platform-assistant": [], // Populated dynamically via setPlatformContext
 };
-
-import { getPlatformTools } from "./telegramTools.js";
 
 // ─── Build and run agent, streaming chunks ────────────────────────────────────
 
@@ -115,11 +121,11 @@ export async function runAgent({
   onChunk: (text: string) => void;
 }): Promise<{ fullText: string; tokensUsed: number }> {
   let tools = AGENT_TOOLS[agentType];
-  
-  if (agentType === "platform-assistant" && userId) {
-    tools = getPlatformTools(userId);
-  } else if (agentType === "platform-assistant") {
-    return { fullText: "Error: User ID is required to use the Platform Assistant. Please link your Telegram account.", tokensUsed: 0 };
+
+  if (agentType === "platform-assistant") {
+    const { ALL_PLATFORM_TOOLS, setPlatformContext } = await import("./platformTools.js");
+    // workspaceId is not in runAgent signature — caller must set context via setPlatformContext before calling
+    tools = ALL_PLATFORM_TOOLS;
   }
 
   const systemPrompt = SYSTEM_PROMPTS[agentType];

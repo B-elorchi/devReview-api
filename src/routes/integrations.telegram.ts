@@ -4,6 +4,7 @@ import { env } from "../config/env.js";
 import { requireAuth } from "../middleware/auth.js";
 import { supabaseAdmin } from "../config/supabase.js";
 import { runAgent, type AgentType } from "../agents/agentFactory.js";
+import { setPlatformContext } from "../agents/platformTools.js";
 
 const r = Router();
 
@@ -57,26 +58,39 @@ const AGENT_COMMANDS: Record<string, { agentType: AgentType; label: string; emoj
 
 const HELP_TEXT = `*DevReview AI Bot* 🤖
 
-I'm your AI code assistant. Send me code and I'll analyse it.
+Full AI platform assistant — manage projects, trigger reviews, push to GitHub, all from Telegram\\.
 
-*Agent Commands:*
-/codereview — 🔍 Senior code review (bugs, anti-patterns, best practices)
-/quality — ⚡ Code quality & architecture (SOLID, complexity, DRY)
-/security — 🔒 Security scan (OWASP Top 10, vulnerabilities, CWEs)
-/devops — 🚀 DevOps & infrastructure (Docker, CI/CD, Kubernetes, Terraform)
-/platform — 🧠 Platform Assistant (Manage projects, trigger reviews, edit code)
+*🧠 Platform \\(just type naturally\\):*
+• "list my projects"
+• "review valetclub\\-admin"
+• "show results for myapp"
+• "create project elorchi\\-backend"
+• "push myapp to github with message: fix auth bug"
+• "write a new index\\.ts for myapp"
+• "read src/auth\\.ts in myapp"
+• "show workspace stats"
 
-*How to use:*
-1. Send a slash command to set the active agent
-2. Paste your code in the next message
-3. Or combine: \`/security\\n<your code here>\`
+Or use shortcuts:
+/projects — List your projects
+/platform — Platform assistant mode
+/review \\`name\\` — Review a project
+/results \\`name\\` — Get last review results
+/files \\`name\\` — List project files
 
-*Examples:*
-• /security → paste SQL query → get vulnerability report
-• /codereview → paste function → get review with fixes
-• /devops → paste Dockerfile → get best practice analysis
+*🔬 Code Analysis Agents:*
+/codereview — Senior code review
+/quality — Code quality & architecture
+/security — Security scan \\(OWASP Top 10\\)
+/devops — DevOps & infrastructure
 
 /help — Show this message`;
+
+const QUICK_COMMANDS: Record<string, (rest: string) => string> = {
+  projects: ()    => "list my projects",
+  review:   (r)   => r ? `review project ${r}` : "list my projects so I can choose which to review",
+  results:  (r)   => r ? `show review results for ${r}` : "list my projects and show latest review results",
+  files:    (r)   => r ? `list files for project ${r}` : "list my projects",
+};
 
 // ─── Per-chat conversation state (in-memory, resets on server restart) ────────
 
@@ -128,34 +142,49 @@ async function processUpdate(update: any) {
     return;
   }
 
-  // slash command to switch agent (with optional inline message)
+  // slash command
   const cmdMatch = text.match(/^\/([a-zA-Z]+)(?:@\w+)?(?:\s+([\s\S]*))?$/);
   if (cmdMatch) {
-    const cmd = cmdMatch[1].toLowerCase();
+    const cmd  = cmdMatch[1].toLowerCase();
     const rest = (cmdMatch[2] ?? "").trim();
-    const agentCfg = AGENT_COMMANDS[cmd];
 
+    // Quick-access platform shortcuts
+    if (cmd in QUICK_COMMANDS) {
+      state.agentType = "platform-assistant";
+      state.history   = [];
+      const syntheticMsg = QUICK_COMMANDS[cmd](rest);
+      await runAgentAndReply(chatId, state, syntheticMsg);
+      return;
+    }
+
+    const agentCfg = AGENT_COMMANDS[cmd];
     if (agentCfg) {
       state.agentType = agentCfg.agentType;
-      state.history   = []; // reset history on agent switch
-
+      state.history   = [];
       if (!rest) {
+        const isplatform = agentCfg.agentType === "platform-assistant";
         await tgSend(chatId,
-          `${agentCfg.emoji} *${agentCfg.label} Agent* activated.\n\nSend me your code or ask me anything. I'll use specialised tools to analyse it for you.`
+          isplatform
+            ? `${agentCfg.emoji} *Platform Assistant* ready!\n\nI have full access to your workspace. Try:\n• "list my projects"\n• "review myapp"\n• "push myapp with message: update readme"\n• "show files for myapp"\n• "create project TestAPI"`
+            : `${agentCfg.emoji} *${agentCfg.label} Agent* activated.\n\nSend me code to analyse.`
         );
         return;
       }
-      // Inline code after slash command — fall through with rest as the message
       await runAgentAndReply(chatId, state, rest);
       return;
     }
 
-    // Unknown command
     await tgSend(chatId, `Unknown command. Send /help to see available commands.`);
     return;
   }
 
-  // Plain message — run with current active agent
+  // Plain message — auto-detect platform intent before falling through to active agent
+  const PLATFORM_INTENT = /\b(list|show|get|my)\s+(project|projects|review|reviews|files?|stats|workspace)|create\s+(project|repo)|delete\s+project|review\s+\w|push\s+(to\s+)?(github|git)|trigger\s+review|write\s+(a\s+)?(file|code)|read\s+(file|src|the\s+file)/i;
+  if (PLATFORM_INTENT.test(text) && state.agentType !== "platform-assistant") {
+    state.agentType = "platform-assistant";
+    state.history   = [];
+  }
+
   await runAgentAndReply(chatId, state, text);
 }
 
@@ -163,9 +192,27 @@ async function runAgentAndReply(chatId: string, state: ChatState, userText: stri
   const agentCfg = Object.values(AGENT_COMMANDS).find(a => a.agentType === state.agentType)
     ?? { label: "Code Review", emoji: "🔍" };
 
-  // Lookup user to log messages
+  // Lookup linked user + workspace
   const { data: link } = await supabaseAdmin.from("telegram_links").select("user_id").eq("chat_id", chatId).maybeSingle();
   const userId = link?.user_id;
+
+  // For platform agent: inject workspace context so tools know which workspace to act on
+  if (state.agentType === "platform-assistant") {
+    if (!userId) {
+      await tgSend(chatId,
+        "⚠️ *Account not linked.*\n\nTo use the Platform Assistant, link your Telegram account:\n1. Open DevReview platform\n2. Go to Settings → Integrations → Telegram\n3. Enter your chat ID: `" + chatId + "`"
+      );
+      return;
+    }
+    // Get default workspace for the user
+    const { data: profile } = await supabaseAdmin.from("profiles").select("default_workspace_id").eq("id", userId).maybeSingle();
+    const workspaceId = profile?.default_workspace_id;
+    if (!workspaceId) {
+      await tgSend(chatId, "⚠️ No workspace found. Please create a workspace on the platform first.");
+      return;
+    }
+    setPlatformContext(userId, workspaceId);
+  }
 
   if (userId) {
     await supabaseAdmin.from("telegram_messages").insert({ user_id: userId, chat_id: chatId, direction: "inbound", text: userText });
