@@ -418,8 +418,8 @@ export const workspaceStatsTool = tool(
       supabaseAdmin.from("workspaces").select("name, plan").eq("id", _workspaceId).maybeSingle(),
     ]);
     return [
-      `📊 *Workspace: ${ws?.data?.name ?? "Unknown"}*`,
-      `Plan: ${ws?.data?.plan ?? "free"}`,
+      `📊 *Workspace: ${ws?.name ?? "Unknown"}*`,
+      `Plan: ${ws?.plan ?? "free"}`,
       `Projects: ${projectCount ?? 0}`,
       `Total reviews: ${reviewCount ?? 0}`,
     ].join("\n");
